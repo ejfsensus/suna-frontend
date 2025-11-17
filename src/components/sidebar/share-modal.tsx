@@ -6,9 +6,10 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Alert, AlertDescription } from "@/components/ui/alert"
-import { Copy, Share2, Link, Link2Off, Check, Globe, Loader2 } from "lucide-react"
+import { Copy, Link, Link2Off, Check, Globe, Loader2 } from "lucide-react"
 import { toast } from "sonner"
-import { useThreadQuery, useUpdateThreadMutation, useUpdateProject } from "@/hooks/react-query"
+import { useThreadQuery, useUpdateThreadMutation } from "@/hooks/threads/use-threads";
+import { useUpdateProject } from "@/hooks/threads/use-project";
 import type { JSX } from "react"
 import { Skeleton } from "../ui/skeleton"
 
@@ -122,7 +123,6 @@ export function ShareModal({ isOpen, onClose, threadId, projectId }: ShareModalP
   }
 
   const updatePublicStatus = async (isPublic: boolean) => {
-    console.log("Updating public status for thread:", threadId, "and project:", projectId, "to", isPublic)
     if (!threadId || !projectId) return
 
     await updateProjectMutation.mutateAsync({
@@ -192,7 +192,6 @@ export function ShareModal({ isOpen, onClose, threadId, projectId }: ShareModalP
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
-            <Share2 className="h-5 w-5" />
             Share Chat
           </DialogTitle>
         </DialogHeader>
@@ -249,11 +248,7 @@ export function ShareModal({ isOpen, onClose, threadId, projectId }: ShareModalP
             </>
           ) : (
             <div className="text-center space-y-4">
-              <div className="mx-auto w-12 h-12 bg-muted-foreground/20 rounded-full flex items-center justify-center">
-                <Share2 className="h-6 w-6" />
-              </div>
               <div className="space-y-2">
-                <h3 className="text-xl font-semibold">Share this chat</h3>
                 <p className="text-sm text-muted-foreground">
                   Create a shareable link that allows others to view this conversation publicly.
                 </p>

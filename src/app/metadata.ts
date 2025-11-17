@@ -4,11 +4,11 @@ import { siteConfig } from '@/lib/site';
 export const metadata: Metadata = {
   title: siteConfig.name,
   description: siteConfig.description,
-  keywords: ['Kortix Suna', 'AI', 'Agent'],
+  keywords: ['Kortix', 'Kortix AI', 'Suna', 'Kortix Suna', 'AI', 'Agent', 'Open Source', 'AI assistant', 'generalist AI worker'],
   authors: [
     {
       name: 'Kortix AI Corp',
-      url: 'https://kortix.ai',
+      url: 'https://kortix.com',
     },
   ],
   creator: 'Kortix AI Corp',
@@ -19,12 +19,21 @@ export const metadata: Metadata = {
     title: siteConfig.name,
     description: siteConfig.description,
     siteName: siteConfig.name,
+    images: [
+      {
+        url: '/banner.png',
+        width: 1200,
+        height: 630,
+        alt: siteConfig.name,
+      },
+    ],
   },
   twitter: {
     card: 'summary_large_image',
     title: siteConfig.name,
     description: siteConfig.description,
-    creator: '@kortixai',
+    creator: '@kortix',
+    images: ['/banner.png'],
   },
   robots: {
     index: true,

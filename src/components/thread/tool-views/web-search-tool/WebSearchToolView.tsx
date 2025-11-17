@@ -10,18 +10,14 @@ import {
   Clock,
   BookOpen,
   CalendarDays,
-  ChevronDown,
-  ChevronUp,
 } from 'lucide-react';
 import { ToolViewProps } from '../types';
 import { cleanUrl, formatTimestamp, getToolTitle } from '../utils';
-import { cn, truncateString } from '@/lib/utils';
-import { useTheme } from 'next-themes';
+import { truncateString } from '@/lib/utils';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { LoadingState } from '../shared/LoadingState';
 import { extractWebSearchData } from './_utils';
 
@@ -34,8 +30,6 @@ export function WebSearchToolView({
   isSuccess = true,
   isStreaming = false,
 }: ToolViewProps) {
-  const { resolvedTheme } = useTheme();
-  const isDarkTheme = resolvedTheme === 'dark';
   const [expandedResults, setExpandedResults] = useState<Record<number, boolean>>({});
 
   const {
@@ -55,13 +49,6 @@ export function WebSearchToolView({
   );
 
   const toolTitle = getToolTitle(name);
-
-  const toggleExpand = (idx: number) => {
-    setExpandedResults(prev => ({
-      ...prev,
-      [idx]: !prev[idx]
-    }));
-  };
 
   const getFavicon = (url: string) => {
     try {
@@ -87,11 +74,11 @@ export function WebSearchToolView({
   };
 
   return (
-    <Card className="gap-0 flex border shadow-none border-t border-b-0 border-x-0 p-0 rounded-none flex-col h-full overflow-hidden bg-white dark:bg-zinc-950">
+    <Card className="gap-0 flex border shadow-none border-t border-b-0 border-x-0 p-0 rounded-none flex-col h-full overflow-hidden bg-card">
       <CardHeader className="h-14 bg-zinc-50/80 dark:bg-zinc-900/80 backdrop-blur-sm border-b p-2 px-4 space-y-2">
         <div className="flex flex-row items-center justify-between">
           <div className="flex items-center gap-2">
-            <div className="relative p-2 rounded-lg bg-gradient-to-br from-blue-500/20 to-blue-600/10 border border-blue-500/20">
+            <div className="relative p-2 rounded-xl bg-gradient-to-br from-blue-500/20 to-blue-600/10 border border-blue-500/20">
               <Search className="w-5 h-5 text-blue-500 dark:text-blue-400" />
             </div>
             <div>
@@ -138,36 +125,40 @@ export function WebSearchToolView({
                 <div className="mb-6">
                   <h3 className="text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-3 flex items-center">
                     <ImageIcon className="h-4 w-4 mr-2 opacity-70" />
-                    Images
+                    Images {name === 'image-search' && `(${images.length})`}
                   </h3>
-                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 mb-1">
-                    {images.slice(0, 6).map((image, idx) => (
-                      <a
-                        key={idx}
-                        href={image}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="group relative overflow-hidden rounded-lg border border-zinc-200 dark:border-zinc-800 bg-zinc-100 dark:bg-zinc-900 hover:border-blue-300 dark:hover:border-blue-700 transition-colors shadow-sm hover:shadow-md"
-                      >
-                        <img
-                          src={image}
-                          alt={`Search result ${idx + 1}`}
-                          className="object-cover w-full h-32 group-hover:opacity-90 transition-opacity"
-                          onError={(e) => {
-                            const target = e.target as HTMLImageElement;
-                            target.src = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='%23888' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='3' y='3' width='18' height='18' rx='2' ry='2'%3E%3C/rect%3E%3Ccircle cx='8.5' cy='8.5' r='1.5'%3E%3C/circle%3E%3Cpolyline points='21 15 16 10 5 21'%3E%3C/polyline%3E%3C/svg%3E";
-                            target.classList.add("p-4");
-                          }}
-                        />
-                        <div className="absolute top-0 right-0 p-1">
-                          <Badge variant="secondary" className="bg-black/60 hover:bg-black/70 text-white border-none shadow-md">
-                            <ExternalLink className="h-3 w-3" />
-                          </Badge>
-                        </div>
-                      </a>
-                    ))}
+                  <div className={`grid gap-3 mb-1 ${name === 'image-search' ? 'grid-cols-2 sm:grid-cols-3 md:grid-cols-4' : 'grid-cols-2 sm:grid-cols-3'}`}>
+                    {(name === 'image-search' ? images : images.slice(0, 6)).map((image, idx) => {
+                      const imageUrl = typeof image === 'string' ? image : (image as any).imageUrl;
+                      
+                      return (
+                        <a
+                          key={idx}
+                          href={imageUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="group relative overflow-hidden rounded-lg border border-zinc-200 dark:border-zinc-800 bg-zinc-100 dark:bg-zinc-900 hover:border-blue-300 dark:hover:border-blue-700 transition-colors shadow-sm hover:shadow-md"
+                        >
+                          <img
+                            src={imageUrl}
+                            alt={`Search result ${idx + 1}`}
+                            className="object-cover w-full h-32 group-hover:opacity-90 transition-opacity"
+                            onError={(e) => {
+                              const target = e.target as HTMLImageElement;
+                              target.src = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='%23888' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='3' y='3' width='18' height='18' rx='2' ry='2'%3E%3C/rect%3E%3Ccircle cx='8.5' cy='8.5' r='1.5'%3E%3C/circle%3E%3Cpolyline points='21 15 16 10 5 21'%3E%3C/polyline%3E%3C/svg%3E";
+                              target.classList.add("p-4");
+                            }}
+                          />
+                          <div className="absolute top-0 right-0 p-1">
+                            <Badge variant="secondary" className="bg-black/60 hover:bg-black/70 text-white border-none shadow-md">
+                              <ExternalLink className="h-3 w-3" />
+                            </Badge>
+                          </div>
+                        </a>
+                      );
+                    })}
                   </div>
-                  {images.length > 6 && (
+                  {name !== 'image-search' && images.length > 6 && (
                     <Button variant="outline" size="sm" className="mt-2 text-xs">
                       View {images.length - 6} more images
                     </Button>
@@ -175,7 +166,7 @@ export function WebSearchToolView({
                 </div>
               )}
 
-              {searchResults.length > 0 && (
+              {searchResults.length > 0 && name !== 'image-search' && (
                 <div className="text-sm font-medium text-zinc-800 dark:text-zinc-200 mb-4 flex items-center justify-between">
                   <span>Search Results ({searchResults.length})</span>
                   <Badge variant="outline" className="text-xs font-normal">
@@ -185,8 +176,9 @@ export function WebSearchToolView({
                 </div>
               )}
 
-              <div className="space-y-4">
-                {searchResults.map((result, idx) => {
+              {name !== 'image-search' && (
+                <div className="space-y-4">
+                  {searchResults.map((result, idx) => {
                   const { icon: ResultTypeIcon, label: resultTypeLabel } = getResultType(result);
                   const isExpanded = expandedResults[idx] || false;
                   const favicon = getFavicon(result.url);
@@ -194,7 +186,7 @@ export function WebSearchToolView({
                   return (
                     <div
                       key={idx}
-                      className="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-lg shadow-sm hover:shadow transition-shadow"
+                      className="bg-card border rounded-lg shadow-sm hover:shadow transition-shadow"
                     >
                       <div className="p-4">
                         <div className="flex items-start gap-3 mb-2">
@@ -303,9 +295,10 @@ export function WebSearchToolView({
                         </div>
                       )}
                     </div>
-                  );
-                })}
-              </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           </ScrollArea>
         ) : (
@@ -330,11 +323,21 @@ export function WebSearchToolView({
 
       <div className="px-4 py-2 h-10 bg-gradient-to-r from-zinc-50/90 to-zinc-100/90 dark:from-zinc-900/90 dark:to-zinc-800/90 backdrop-blur-sm border-t border-zinc-200 dark:border-zinc-800 flex justify-between items-center gap-4">
         <div className="h-full flex items-center gap-2 text-sm text-zinc-500 dark:text-zinc-400">
-          {!isStreaming && searchResults.length > 0 && (
-            <Badge variant="outline" className="h-6 py-0.5">
-              <Globe className="h-3 w-3" />
-              {searchResults.length} results
-            </Badge>
+          {!isStreaming && (
+            <>
+              {name === 'image-search' && images.length > 0 && (
+                <Badge variant="outline" className="h-6 py-0.5">
+                  <ImageIcon className="h-3 w-3" />
+                  {images.length} images
+                </Badge>
+              )}
+              {name !== 'image-search' && searchResults.length > 0 && (
+                <Badge variant="outline" className="h-6 py-0.5">
+                  <Globe className="h-3 w-3" />
+                  {searchResults.length} results
+                </Badge>
+              )}
+            </>
           )}
         </div>
 

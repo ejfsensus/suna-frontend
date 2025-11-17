@@ -5,15 +5,15 @@ export enum EnvMode {
   PRODUCTION = 'production',
 }
 
-// Subscription tier structure
+// Subscription tier structure - tier keys only, no price IDs
 export interface SubscriptionTierData {
-  priceId: string;
-  name: string;
+  tierKey: string;  // Backend tier key like 'free', 'tier_2_20', etc.
+  name: string;     // Display name like 'Basic', 'Plus', 'Pro'
 }
 
-// Subscription tiers structure
+// Subscription tiers structure - ONLY tier keys, price IDs come from backend
 export interface SubscriptionTiers {
-  FREE: SubscriptionTierData;
+  FREE_TIER: SubscriptionTierData;
   TIER_2_20: SubscriptionTierData;
   TIER_6_50: SubscriptionTierData;
   TIER_12_100: SubscriptionTierData;
@@ -27,125 +27,73 @@ export interface SubscriptionTiers {
 interface Config {
   ENV_MODE: EnvMode;
   IS_LOCAL: boolean;
+  IS_STAGING: boolean;
   SUBSCRIPTION_TIERS: SubscriptionTiers;
 }
 
-// Production tier IDs
-const PROD_TIERS: SubscriptionTiers = {
-  FREE: {
-    priceId: 'price_1RILb4G6l1KZGqIrK4QLrx9i',
-    name: 'Free',
+// Tier keys - single source, no environment-specific price IDs
+const TIERS: SubscriptionTiers = {
+  FREE_TIER: {
+    tierKey: 'free',
+    name: 'Basic/$0',
   },
   TIER_2_20: {
-    priceId: 'price_1RILb4G6l1KZGqIrhomjgDnO',
-    name: '2h/$20',
+    tierKey: 'tier_2_20',
+    name: 'Plus/$20',
   },
   TIER_6_50: {
-    priceId: 'price_1RILb4G6l1KZGqIr5q0sybWn',
-    name: '6h/$50',
+    tierKey: 'tier_6_50',
+    name: 'Pro/$50',
   },
   TIER_12_100: {
-    priceId: 'price_1RILb4G6l1KZGqIr5Y20ZLHm',
-    name: '12h/$100',
+    tierKey: 'tier_12_100',
+    name: 'Business/$100',
   },
   TIER_25_200: {
-    priceId: 'price_1RILb4G6l1KZGqIrGAD8rNjb',
-    name: '25h/$200',
+    tierKey: 'tier_25_200',
+    name: 'Ultra/$200',
   },
   TIER_50_400: {
-    priceId: 'price_1RILb4G6l1KZGqIruNBUMTF1',
-    name: '50h/$400',
+    tierKey: 'tier_50_400',
+    name: 'Enterprise/$400',
   },
   TIER_125_800: {
-    priceId: 'price_1RILb3G6l1KZGqIrbJA766tN',
-    name: '125h/$800',
+    tierKey: 'tier_125_800',
+    name: 'Scale/$800',
   },
   TIER_200_1000: {
-    priceId: 'price_1RILb3G6l1KZGqIrmauYPOiN',
-    name: '200h/$1000',
+    tierKey: 'tier_200_1000',
+    name: 'Max/$1000',
   },
 } as const;
 
-// Staging tier IDs
-const STAGING_TIERS: SubscriptionTiers = {
-  FREE: {
-    priceId: 'price_1RIGvuG6l1KZGqIrw14abxeL',
-    name: 'Free',
-  },
-  TIER_2_20: {
-    priceId: 'price_1RIGvuG6l1KZGqIrCRu0E4Gi',
-    name: '2h/$20',
-  },
-  TIER_6_50: {
-    priceId: 'price_1RIGvuG6l1KZGqIrvjlz5p5V',
-    name: '6h/$50',
-  },
-  TIER_12_100: {
-    priceId: 'price_1RIGvuG6l1KZGqIrT6UfgblC',
-    name: '12h/$100',
-  },
-  TIER_25_200: {
-    priceId: 'price_1RIGvuG6l1KZGqIrOVLKlOMj',
-    name: '25h/$200',
-  },
-  TIER_50_400: {
-    priceId: 'price_1RIKNgG6l1KZGqIrvsat5PW7',
-    name: '50h/$400',
-  },
-  TIER_125_800: {
-    priceId: 'price_1RIKNrG6l1KZGqIrjKT0yGvI',
-    name: '125h/$800',
-  },
-  TIER_200_1000: {
-    priceId: 'price_1RIKQ2G6l1KZGqIrum9n8SI7',
-    name: '200h/$1000',
-  },
-} as const;
-
-// Determine the environment mode from environment variables
-const getEnvironmentMode = (): EnvMode => {
-  // Get the environment mode from the environment variable, if set
-  const envMode = process.env.NEXT_PUBLIC_ENV_MODE?.toLowerCase();
-
-  // First check if the environment variable is explicitly set
-  if (envMode) {
-    if (envMode === EnvMode.LOCAL) {
-      console.log('Using explicitly set LOCAL environment mode');
+function getEnvironmentMode(): EnvMode {
+  const envMode = process.env.NEXT_PUBLIC_ENV_MODE?.toUpperCase();
+  switch (envMode) {
+    case 'LOCAL':
       return EnvMode.LOCAL;
-    } else if (envMode === EnvMode.STAGING) {
-      console.log('Using explicitly set STAGING environment mode');
+    case 'STAGING':
       return EnvMode.STAGING;
-    } else if (envMode === EnvMode.PRODUCTION) {
-      console.log('Using explicitly set PRODUCTION environment mode');
+    case 'PRODUCTION':
       return EnvMode.PRODUCTION;
-    }
+    default:
+      return EnvMode.LOCAL;
   }
+}
 
-  // If no valid environment mode is set, fall back to defaults based on NODE_ENV
-  if (process.env.NODE_ENV === 'development') {
-    console.log('Defaulting to LOCAL environment mode in development');
-    return EnvMode.LOCAL;
-  } else {
-    console.log('Defaulting to PRODUCTION environment mode');
-    return EnvMode.PRODUCTION;
-  }
-};
-
-// Get the environment mode once to ensure consistency
 const currentEnvMode = getEnvironmentMode();
 
-// Create the config object
 export const config: Config = {
   ENV_MODE: currentEnvMode,
   IS_LOCAL: currentEnvMode === EnvMode.LOCAL,
-  SUBSCRIPTION_TIERS:
-    currentEnvMode === EnvMode.STAGING ? STAGING_TIERS : PROD_TIERS,
+  IS_STAGING: currentEnvMode === EnvMode.STAGING,
+  SUBSCRIPTION_TIERS: TIERS,  // Same tiers for all environments
 };
 
-// Helper function to check if we're in local mode (for component conditionals)
 export const isLocalMode = (): boolean => {
   return config.IS_LOCAL;
 };
 
-// Export subscription tier type for typing elsewhere
-export type SubscriptionTier = keyof typeof PROD_TIERS;
+export const isStagingMode = (): boolean => {
+  return config.IS_STAGING;
+};

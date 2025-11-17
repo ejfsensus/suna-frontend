@@ -8,11 +8,9 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
-import { Skeleton } from '@/components/ui/skeleton';
 import {
   File,
   Folder,
-  FolderOpen,
   Upload,
   Download,
   ChevronRight,
@@ -23,18 +21,19 @@ import {
   FileText,
   ChevronDown,
   Archive,
+  Copy,
+  Check,
+  Edit,
 } from 'lucide-react';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import {
   FileRenderer,
-  getFileTypeFromExtension,
 } from '@/components/file-renderers';
 import {
   listSandboxFiles,
-  getSandboxFileContent,
   type FileInfo,
-  Project,
-} from '@/lib/api';
+} from '@/lib/api/sandbox';
+import { Project } from '@/lib/api/projects';
 import { toast } from 'sonner';
 import { createClient } from '@/lib/supabase/client';
 import { useAuth } from '@/components/AuthProvider';
@@ -47,11 +46,11 @@ import {
 import {
   useDirectoryQuery,
   useFileContentQuery,
-  useFileUpload,
   FileCache
-} from '@/hooks/react-query/files';
+} from '@/hooks/files';
 import JSZip from 'jszip';
 import { normalizeFilenameToNFC } from '@/lib/utils/unicode';
+import { TipTapDocumentModal } from './tiptap-document-modal';
 
 // Define API_URL
 const API_URL = process.env.NEXT_PUBLIC_BACKEND_URL || '';
@@ -87,15 +86,6 @@ export function FileViewerModal({
   const [currentFileIndex, setCurrentFileIndex] = useState<number>(-1);
   const isFileListMode = Boolean(filePathList && filePathList.length > 0);
 
-  // Debug filePathList changes
-  useEffect(() => {
-    console.log('[FILE VIEWER DEBUG] filePathList changed:', {
-      filePathList,
-      length: filePathList?.length,
-      isFileListMode,
-      currentFileIndex
-    });
-  }, [filePathList, isFileListMode, currentFileIndex]);
 
   // Use React Query for directory listing
   const {
@@ -109,7 +99,6 @@ export function FileViewerModal({
   });
 
   // Add a navigation lock to prevent race conditions
-  const [isNavigationLocked, setIsNavigationLocked] = useState(false);
   const currentNavigationRef = useRef<string | null>(null);
 
   // File content state
@@ -130,7 +119,7 @@ export function FileViewerModal({
     error: cachedFileError,
   } = useFileContentQuery(
     sandboxId,
-    selectedFilePath,
+    selectedFilePath || undefined,
     {
       // Auto-detect content type consistently with other components
       enabled: !!selectedFilePath,
@@ -153,13 +142,7 @@ export function FileViewerModal({
 
   // Add state for PDF export
   const [isExportingPdf, setIsExportingPdf] = useState(false);
-  const markdownContainerRef = useRef<HTMLDivElement>(null);
   const markdownRef = useRef<HTMLDivElement>(null);
-
-  // Add state for print orientation
-  const [pdfOrientation, setPdfOrientation] = useState<
-    'portrait' | 'landscape'
-  >('portrait');
 
   // Add a ref to track active download URLs
   const activeDownloadUrls = useRef<Set<string>>(new Set());
@@ -172,6 +155,14 @@ export function FileViewerModal({
     currentFile: string;
   } | null>(null);
 
+  // Add state for copy functionality
+  const [isCopyingPath, setIsCopyingPath] = useState(false);
+  const [isCopyingContent, setIsCopyingContent] = useState(false);
+  
+  // Add state for TipTap document editor
+  const [isEditorOpen, setIsEditorOpen] = useState(false);
+  const [editorDocumentData, setEditorDocumentData] = useState<any>(null);
+
   // Setup project with sandbox URL if not provided directly
   useEffect(() => {
     if (project) {
@@ -183,11 +174,6 @@ export function FileViewerModal({
   const normalizePath = useCallback((path: unknown): string => {
     // Explicitly check if the path is a non-empty string
     if (typeof path !== 'string' || !path) {
-      console.warn(
-        `[FILE VIEWER] normalizePath received non-string or empty value:`,
-        path,
-        `Returning '/workspace'`,
-      );
       return '/workspace';
     }
     // Now we know path is a string
@@ -209,7 +195,6 @@ export function FileViewerModal({
       visited.add(dirPath);
 
       try {
-        console.log(`[DOWNLOAD ALL] Exploring directory: ${dirPath}`);
         const files = await listSandboxFiles(sandboxId, dirPath);
 
         for (const file of files) {
@@ -223,14 +208,12 @@ export function FileViewerModal({
           }
         }
       } catch (error) {
-        console.error(`[DOWNLOAD ALL] Error exploring directory ${dirPath}:`, error);
         toast.error(`Failed to read directory: ${dirPath}`);
       }
     };
 
     await exploreDirectory(startPath);
 
-    console.log(`[DOWNLOAD ALL] Discovered ${allFiles.length} files, total size: ${totalSize} bytes`);
     return { files: allFiles, totalSize };
   }, [sandboxId]);
 
@@ -249,8 +232,6 @@ export function FileViewerModal({
         toast.error('No files found to download');
         return;
       }
-
-      console.log(`[DOWNLOAD ALL] Starting download of ${files.length} files`);
 
       // Step 2: Create zip and load files
       const zip = new JSZip();
@@ -276,7 +257,6 @@ export function FileViewerModal({
 
           if (!content) {
             // Load from server if not cached
-            console.log(`[DOWNLOAD ALL] Loading file from server: ${file.path}`);
             const response = await fetch(
               `${process.env.NEXT_PUBLIC_BACKEND_URL}/sandboxes/${sandboxId}/files/content?path=${encodeURIComponent(file.path)}`,
               {
@@ -285,7 +265,6 @@ export function FileViewerModal({
             );
 
             if (!response.ok) {
-              console.warn(`[DOWNLOAD ALL] Failed to load file: ${file.path} (${response.status})`);
               continue; // Skip this file and continue with others
             }
 
@@ -312,7 +291,6 @@ export function FileViewerModal({
                 const blobContent = await blobResponse.blob();
                 zip.file(relativePath, blobContent);
               } catch (blobError) {
-                console.warn(`[DOWNLOAD ALL] Failed to fetch blob content for: ${file.path}`, blobError);
                 // Fallback: try to fetch from server directly
                 const fallbackResponse = await fetch(
                   `${process.env.NEXT_PUBLIC_BACKEND_URL}/sandboxes/${sandboxId}/files/content?path=${encodeURIComponent(file.path)}`,
@@ -332,10 +310,7 @@ export function FileViewerModal({
             zip.file(relativePath, JSON.stringify(content, null, 2));
           }
 
-          console.log(`[DOWNLOAD ALL] Added to zip: ${relativePath} (${i + 1}/${files.length})`);
-
         } catch (fileError) {
-          console.error(`[DOWNLOAD ALL] Error processing file ${file.path}:`, fileError);
           // Continue with other files
         }
       }
@@ -347,7 +322,6 @@ export function FileViewerModal({
         currentFile: 'Generating zip file...'
       });
 
-      console.log('[DOWNLOAD ALL] Generating zip file...');
       const zipBlob = await zip.generateAsync({
         type: 'blob',
         compression: 'DEFLATE',
@@ -367,10 +341,8 @@ export function FileViewerModal({
       setTimeout(() => URL.revokeObjectURL(url), 10000);
 
       toast.success(`Downloaded ${files.length} files as zip archive`);
-      console.log(`[DOWNLOAD ALL] Successfully created zip with ${files.length} files`);
 
     } catch (error) {
-      console.error('[DOWNLOAD ALL] Error creating zip:', error);
       toast.error(`Failed to create zip archive: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
       setIsDownloadingAll(false);
@@ -385,7 +357,6 @@ export function FileViewerModal({
 
   // Helper function to clear the selected file
   const clearSelectedFile = useCallback(() => {
-    console.log(`[FILE VIEWER DEBUG] clearSelectedFile called, isFileListMode: ${isFileListMode}`);
     setSelectedFilePath(null);
     setRawContent(null);
     setTextContentForRenderer(null); // Clear derived text content
@@ -393,10 +364,7 @@ export function FileViewerModal({
     setContentError(null);
     // Only reset file list mode index when not in file list mode
     if (!isFileListMode) {
-      console.log(`[FILE VIEWER DEBUG] Resetting currentFileIndex in clearSelectedFile`);
       setCurrentFileIndex(-1);
-    } else {
-      console.log(`[FILE VIEWER DEBUG] Keeping currentFileIndex in clearSelectedFile because in file list mode`);
     }
   }, [isFileListMode]);
 
@@ -406,9 +374,6 @@ export function FileViewerModal({
       if (file.is_dir) {
         // For directories, just navigate to that folder
         const normalizedPath = normalizePath(file.path);
-        console.log(
-          `[FILE VIEWER] Navigating to folder: ${file.path} → ${normalizedPath}`,
-        );
 
         // Clear selected file when navigating
         clearSelectedFile();
@@ -420,24 +385,7 @@ export function FileViewerModal({
 
       // Skip if already selected
       if (selectedFilePath === file.path) {
-        console.log(`[FILE VIEWER] File already selected: ${file.path}`);
         return;
-      }
-
-      console.log(`[FILE VIEWER] Opening file: ${file.path}`);
-
-      // Check file types for logging
-      const isImageFile = FileCache.isImageFile(file.path);
-      const isPdfFile = FileCache.isPdfFile(file.path);
-      const extension = file.path.split('.').pop()?.toLowerCase();
-      const isOfficeFile = ['xlsx', 'xls', 'docx', 'doc', 'pptx', 'ppt'].includes(extension || '');
-
-      if (isImageFile) {
-        console.log(`[FILE VIEWER][IMAGE DEBUG] Opening image file: ${file.path}`);
-      } else if (isPdfFile) {
-        console.log(`[FILE VIEWER] Opening PDF file: ${file.path}`);
-      } else if (isOfficeFile) {
-        console.log(`[FILE VIEWER] Opening Office document: ${file.path} (${extension})`);
       }
 
       // Clear previous state and set selected file
@@ -446,10 +394,7 @@ export function FileViewerModal({
 
       // Only reset file index if we're NOT in file list mode or the file is not in the list
       if (!isFileListMode || !filePathList?.includes(file.path)) {
-        console.log(`[FILE VIEWER DEBUG] Resetting currentFileIndex because not in file list mode or file not in list`);
         setCurrentFileIndex(-1);
-      } else {
-        console.log(`[FILE VIEWER DEBUG] Keeping currentFileIndex because file is in file list mode`);
       }
 
       // The useFileContentQuery hook will automatically handle loading the content
@@ -472,16 +417,13 @@ export function FileViewerModal({
 
     // Skip repeated loads for the same path
     if (isLoadingFiles && currentNavigationRef.current === currentPath) {
-      console.log(`[FILE VIEWER] Already loading ${currentPath}, skipping duplicate load`);
       return;
     }
 
     // Track current navigation
     currentNavigationRef.current = currentPath;
-    console.log(`[FILE VIEWER] Starting navigation to: ${currentPath}`);
 
     // React Query handles the loading state automatically
-    console.log(`[FILE VIEWER] React Query will handle directory listing for: ${currentPath}`);
 
     // After the first load, set isInitialLoad to false
     if (isInitialLoad) {
@@ -490,7 +432,6 @@ export function FileViewerModal({
 
     // Handle any loading errors
     if (filesError) {
-      console.error('Failed to load files:', filesError);
       toast.error('Failed to load files');
     }
   }, [open, sandboxId, currentPath, isInitialLoad, isLoadingFiles, filesError]);
@@ -502,14 +443,6 @@ export function FileViewerModal({
 
       // Ensure the path is properly normalized
       const normalizedPath = normalizePath(folder.path);
-
-      // Always navigate to the folder to ensure breadcrumbs update correctly
-      console.log(
-        `[FILE VIEWER] Navigating to folder: ${folder.path} → ${normalizedPath}`,
-      );
-      console.log(
-        `[FILE VIEWER] Current path before navigation: ${currentPath}`,
-      );
 
       // Clear selected file when navigating
       clearSelectedFile();
@@ -525,11 +458,6 @@ export function FileViewerModal({
     (path: string) => {
       const normalizedPath = normalizePath(path);
 
-      // Always navigate when clicking breadcrumbs to ensure proper update
-      console.log(
-        `[FILE VIEWER] Navigating to breadcrumb path: ${path} → ${normalizedPath}`,
-      );
-
       // Clear selected file and set path
       clearSelectedFile();
       setCurrentPath(normalizedPath);
@@ -539,9 +467,6 @@ export function FileViewerModal({
 
   // Helper function to navigate to home
   const navigateHome = useCallback(() => {
-    // Always navigate home when clicked to ensure consistent behavior
-    console.log('[FILE VIEWER] Navigating home from:', currentPath);
-
     clearSelectedFile();
     setCurrentPath('/workspace');
   }, [clearSelectedFile, currentPath]);
@@ -572,7 +497,7 @@ export function FileViewerModal({
   );
 
   // Add a helper to directly interact with the raw cache
-  const directlyAccessCache = useCallback(
+  const _directlyAccessCache = useCallback(
     (filePath: string): {
       found: boolean;
       content: any;
@@ -589,15 +514,12 @@ export function FileViewerModal({
 
       // Create cache key with detected content type
       const cacheKey = `${sandboxId}:${normalizedPath}:${detectedContentType}`;
-      console.log(`[FILE VIEWER] Checking cache for key: ${cacheKey}`);
 
       if (FileCache.has(cacheKey)) {
         const cachedContent = FileCache.get(cacheKey);
-        console.log(`[FILE VIEWER] Direct cache hit for ${normalizedPath} (${detectedContentType})`);
         return { found: true, content: cachedContent, contentType: detectedContentType };
       }
 
-      console.log(`[FILE VIEWER] Cache miss for key: ${cacheKey}`);
       return { found: false, content: null, contentType: detectedContentType };
     },
     [sandboxId],
@@ -605,20 +527,11 @@ export function FileViewerModal({
 
   // Navigation functions for file list mode
   const navigateToFileByIndex = useCallback((index: number) => {
-    console.log('[FILE VIEWER DEBUG] navigateToFileByIndex called:', {
-      index,
-      isFileListMode,
-      filePathList,
-      filePathListLength: filePathList?.length
-    });
-
     if (!isFileListMode || !filePathList || index < 0 || index >= filePathList.length) {
-      console.log('[FILE VIEWER DEBUG] navigateToFileByIndex early return - invalid conditions');
       return;
     }
 
     const filePath = filePathList[index];
-    console.log('[FILE VIEWER DEBUG] Setting currentFileIndex to:', index, 'for file:', filePath);
     setCurrentFileIndex(index);
 
     // Create a temporary FileInfo object for the file
@@ -652,30 +565,11 @@ export function FileViewerModal({
   useEffect(() => {
     // Only run if modal is open, initial path is provided, AND it hasn't been processed yet
     if (open && safeInitialFilePath && !initialPathProcessed) {
-      console.log(
-        `[FILE VIEWER] useEffect[initialFilePath]: Processing initial path: ${safeInitialFilePath}`,
-      );
-
       // If we're in file list mode, find the index and navigate to it
       if (isFileListMode && filePathList) {
-        console.log('[FILE VIEWER DEBUG] Initial file path - file list mode detected:', {
-          isFileListMode,
-          filePathList,
-          safeInitialFilePath,
-          filePathListLength: filePathList.length
-        });
-
         const normalizedInitialPath = normalizePath(safeInitialFilePath);
         const index = filePathList.findIndex(path => normalizePath(path) === normalizedInitialPath);
-
-        console.log('[FILE VIEWER DEBUG] Found index for initial file:', {
-          normalizedInitialPath,
-          index,
-          foundPath: index !== -1 ? filePathList[index] : 'not found'
-        });
-
         if (index !== -1) {
-          console.log(`[FILE VIEWER] File list mode: navigating to index ${index} for ${normalizedInitialPath}`);
           navigateToFileByIndex(index);
           setInitialPathProcessed(true);
           return;
@@ -692,23 +586,14 @@ export function FileViewerModal({
       const fileName =
         lastSlashIndex >= 0 ? fullPath.substring(lastSlashIndex + 1) : '';
 
-      console.log(
-        `[FILE VIEWER] useEffect[initialFilePath]: Normalized Path: ${fullPath}, Directory: ${directoryPath}, File: ${fileName}`,
-      );
-
       // Set the current path to the target directory
       // This will trigger the other useEffect to load files for this directory
       if (currentPath !== directoryPath) {
-        console.log(
-          `[FILE VIEWER] useEffect[initialFilePath]: Setting current path to ${directoryPath}`,
-        );
         setCurrentPath(directoryPath);
       }
 
       // Try to load the file directly from cache if possible
       if (safeInitialFilePath) {
-        console.log(`[FILE VIEWER] Attempting to load initial file directly from cache: ${safeInitialFilePath}`);
-
         // Create a temporary FileInfo object for the initial file
         const initialFile: FileInfo = {
           name: fileName,
@@ -719,7 +604,6 @@ export function FileViewerModal({
         };
 
         // Now that openFile is defined first, we can call it directly
-        console.log(`[FILE VIEWER] Opening initial file: ${fullPath}`);
         openFile(initialFile);
       }
 
@@ -727,9 +611,6 @@ export function FileViewerModal({
       setInitialPathProcessed(true);
     } else if (!open) {
       // Reset the processed flag when the modal closes
-      console.log(
-        '[FILE VIEWER] useEffect[initialFilePath]: Modal closed, resetting initialPathProcessed flag.',
-      );
       setInitialPathProcessed(false);
     }
   }, [open, safeInitialFilePath, initialPathProcessed, normalizePath, currentPath, openFile, isFileListMode, filePathList, navigateToFileByIndex]);
@@ -746,13 +627,11 @@ export function FileViewerModal({
 
     // Handle successful content
     if (cachedFileContent !== null && !isCachedFileLoading) {
-      console.log(`[FILE VIEWER] Received cached content for: ${selectedFilePath}`);
-
       // Check file type to determine proper handling
       const isImageFile = FileCache.isImageFile(selectedFilePath);
       const isPdfFile = FileCache.isPdfFile(selectedFilePath);
       const extension = selectedFilePath.split('.').pop()?.toLowerCase();
-      const isOfficeFile = ['xlsx', 'xls', 'docx', 'doc', 'pptx', 'ppt'].includes(extension || '');
+      const isOfficeFile = ['xlsx', 'xls', 'docx', 'pptx', 'ppt'].includes(extension || '');
       const isBinaryFile = isImageFile || isPdfFile || isOfficeFile;
 
       // Store raw content
@@ -762,30 +641,31 @@ export function FileViewerModal({
       if (typeof cachedFileContent === 'string') {
         if (cachedFileContent.startsWith('blob:')) {
           // It's already a blob URL
-          console.log(`[FILE VIEWER] Setting blob URL from cached content: ${cachedFileContent}`);
           setTextContentForRenderer(null);
           setBlobUrlForRenderer(cachedFileContent);
         } else if (isBinaryFile) {
           // Binary files should not be displayed as text, even if they come as strings
-          console.warn(`[FILE VIEWER] Binary file received as string content, this should not happen: ${selectedFilePath}`);
           setTextContentForRenderer(null);
           setBlobUrlForRenderer(null);
           setContentError('Binary file received in incorrect format. Please try refreshing.');
         } else {
           // Actual text content for text files
-          console.log(`[FILE VIEWER] Setting text content for text file: ${selectedFilePath}`);
           setTextContentForRenderer(cachedFileContent);
           setBlobUrlForRenderer(null);
         }
       } else if (isBlob(cachedFileContent)) {
         // Create blob URL for binary content
         const url = URL.createObjectURL(cachedFileContent);
-        console.log(`[FILE VIEWER] Created blob URL: ${url} for ${selectedFilePath}`);
         setBlobUrlForRenderer(url);
         setTextContentForRenderer(null);
-      } else {
+      } else if (typeof cachedFileContent === 'object') {
+        // convert to json string if file_contents is a object
+        const jsonString = JSON.stringify(cachedFileContent, null, 2);
+        setTextContentForRenderer(jsonString);
+        setBlobUrlForRenderer(null);
+      }
+      else {
         // Unknown content type
-        console.warn(`[FILE VIEWER] Unknown content type for: ${selectedFilePath}`, typeof cachedFileContent);
         setTextContentForRenderer(null);
         setBlobUrlForRenderer(null);
         setContentError('Unknown content type received.');
@@ -797,7 +677,6 @@ export function FileViewerModal({
   useEffect(() => {
     return () => {
       if (blobUrlForRenderer && !isDownloading && !activeDownloadUrls.current.has(blobUrlForRenderer)) {
-        console.log(`[FILE VIEWER] Revoking blob URL on cleanup: ${blobUrlForRenderer}`);
         URL.revokeObjectURL(blobUrlForRenderer);
       }
     };
@@ -825,11 +704,8 @@ export function FileViewerModal({
   const handleOpenChange = useCallback(
     (open: boolean) => {
       if (!open) {
-        console.log('[FILE VIEWER] handleOpenChange: Modal closing, resetting state.');
-
         // Only revoke if not downloading and not an active download URL
         if (blobUrlForRenderer && !isDownloading && !activeDownloadUrls.current.has(blobUrlForRenderer)) {
-          console.log(`[FILE VIEWER] Manually revoking blob URL on modal close: ${blobUrlForRenderer}`);
           URL.revokeObjectURL(blobUrlForRenderer);
         }
 
@@ -853,6 +729,102 @@ export function FileViewerModal({
   const isMarkdownFile = useCallback((filePath: string | null) => {
     return filePath ? filePath.toLowerCase().endsWith('.md') : false;
   }, []);
+  
+
+  const isDocumentFile = useCallback((filePath: string | null) => {
+    if (!filePath) return false;
+    const lower = filePath.toLowerCase();
+    return lower.endsWith('.doc');
+  }, []);
+  
+  const isTipTapDocumentContent = useCallback((content: string | null) => {
+    if (!content) return false;
+    try {
+      const parsed = JSON.parse(content);
+      return parsed.type === 'tiptap_document';
+    } catch {
+      return false;
+    }
+  }, []);
+
+  const copyToClipboard = useCallback(async (text: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch (err) {
+      return false;
+    }
+  }, []);
+
+  const handleCopyPath = useCallback(async () => {
+    if (!textContentForRenderer) return;
+    
+    setIsCopyingPath(true);
+    const success = await copyToClipboard(textContentForRenderer);
+    if (success) {
+      toast.success('File content copied to clipboard');
+    } else {
+      toast.error('Failed to copy file content');
+    }
+    setTimeout(() => setIsCopyingPath(false), 500);
+  }, [textContentForRenderer, copyToClipboard]);
+
+  const handleCopyContent = useCallback(async () => {
+    if (!textContentForRenderer) return;
+    
+    setIsCopyingContent(true);
+    const success = await copyToClipboard(textContentForRenderer);
+    if (success) {
+      toast.success('File content copied to clipboard');
+    } else {
+      toast.error('Failed to copy file content');
+    }
+    setTimeout(() => setIsCopyingContent(false), 500);
+  }, [textContentForRenderer, copyToClipboard]);
+  
+  // Handle opening the TipTap document editor
+  const handleOpenEditor = useCallback(() => {
+    if (!selectedFilePath || !textContentForRenderer || !isDocumentFile(selectedFilePath)) {
+      return;
+    }
+    
+    // Check if it's actually a TipTap document by examining content
+    if (!isTipTapDocumentContent(textContentForRenderer)) {
+      toast.error('This document format is not supported for editing');
+      return;
+    }
+    
+    // Parse the TipTap document JSON
+    try {
+      const documentData = JSON.parse(textContentForRenderer);
+      setEditorDocumentData(documentData);
+      setIsEditorOpen(true);
+    } catch (error) {
+      toast.error('Failed to parse document data');
+    }
+  }, [selectedFilePath, textContentForRenderer, isDocumentFile, isTipTapDocumentContent]);
+  
+  // Handle document save from editor
+  const handleDocumentSave = useCallback(() => {
+    // Refresh the file content after saving
+    if (selectedFilePath) {
+      // Clear cache for this file to force reload
+      const normalizedPath = normalizePath(selectedFilePath);
+      const contentType = FileCache.getContentTypeFromPath(normalizedPath);
+      const cacheKey = `${sandboxId}:${normalizedPath}:${contentType}`;
+      FileCache.delete(cacheKey);
+      
+      // Re-open the file to reload content
+      const fileName = selectedFilePath.split('/').pop() || '';
+      openFile({
+        name: fileName,
+        path: normalizedPath,
+        is_dir: false,
+        size: 0,
+        mod_time: new Date().toISOString(),
+      });
+    }
+  }, [selectedFilePath, sandboxId, normalizePath, openFile]);
 
   // Handle PDF export for markdown files
   const handleExportPdf = useCallback(
@@ -881,7 +853,7 @@ export function FileViewerModal({
         }
 
         // Get the base URL for resolving relative URLs
-        const baseUrl = window.location.origin;
+        const _baseUrl = window.location.origin;
 
         // Generate HTML content
         const fileName = selectedFilePath.split('/').pop() || 'document';
@@ -1018,7 +990,6 @@ export function FileViewerModal({
 
         toast.success('PDF export initiated. Check your print dialog.');
       } catch (error) {
-        console.error('PDF export failed:', error);
         toast.error(
           `Failed to export PDF: ${error instanceof Error ? error.message : String(error)}`,
         );
@@ -1088,7 +1059,6 @@ export function FileViewerModal({
       downloadBlob(finalBlob, fileName);
 
     } catch (error) {
-      console.error('[FILE VIEWER] Download error:', error);
       toast.error(`Failed to download file: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
       setIsDownloading(false);
@@ -1135,7 +1105,8 @@ export function FileViewerModal({
       try {
         // Normalize filename to NFC
         const normalizedName = normalizeFilenameToNFC(file.name);
-        const uploadPath = `${currentPath}/${normalizedName}`;
+        // Use uploads directory - backend will handle unique naming
+        const uploadPath = `/workspace/uploads/${normalizedName}`;
 
         const formData = new FormData();
         // If the filename was normalized, append with the normalized name in the field name
@@ -1168,12 +1139,20 @@ export function FileViewerModal({
           throw new Error(error || 'Upload failed');
         }
 
+        // Parse response to get the actual filename used
+        const responseData = await response.json();
+        const finalFilename = responseData.final_filename || normalizedName;
+        const wasRenamed = responseData.renamed || false;
+
         // Reload the file list using React Query
         await refetchFiles();
 
-        toast.success(`Uploaded: ${normalizedName}`);
+        if (wasRenamed) {
+          toast.success(`Uploaded as: ${finalFilename} (renamed to avoid conflict)`);
+        } else {
+          toast.success(`Uploaded: ${finalFilename}`);
+        }
       } catch (error) {
-        console.error('Upload failed:', error);
         toast.error(
           `Upload failed: ${error instanceof Error ? error.message : String(error)}`,
         );
@@ -1182,7 +1161,7 @@ export function FileViewerModal({
         if (event.target) event.target.value = '';
       }
     },
-    [currentPath, sandboxId, refetchFiles],
+    [sandboxId, refetchFiles],
   );
 
   // Reset file list mode when modal opens without filePathList
@@ -1194,9 +1173,11 @@ export function FileViewerModal({
 
   // --- Render --- //
   return (
-    <Dialog open={open} onOpenChange={handleOpenChange}>
+    <>
+      <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent className="sm:max-w-[90vw] md:max-w-[1200px] w-[95vw] h-[90vh] max-h-[900px] flex flex-col p-0 gap-0 overflow-hidden">
-        <DialogHeader className="px-4 py-2 border-b flex-shrink-0 flex flex-row gap-4 items-center">
+        {/* Header */}
+        <DialogHeader className="px-4 py-3 flex-shrink-0 flex flex-row gap-4 items-center border-b">
           <DialogTitle className="text-lg font-semibold">
             Workspace Files
           </DialogTitle>
@@ -1204,8 +1185,8 @@ export function FileViewerModal({
           {/* Download progress display */}
           {downloadProgress && (
             <div className="flex items-center gap-2 text-sm text-muted-foreground">
-              <div className="flex items-center gap-1">
-                <Loader className="h-3 w-3 animate-spin" />
+              <div className="flex items-center gap-1.5">
+                <Loader className="h-4 w-4 animate-spin" />
                 <span>
                   {downloadProgress.total > 0
                     ? `${downloadProgress.current}/${downloadProgress.total}`
@@ -1219,19 +1200,9 @@ export function FileViewerModal({
             </div>
           )}
 
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 ml-auto">
             {/* Navigation arrows for file list mode */}
             {(() => {
-              // Debug logging
-              console.log('[FILE VIEWER DEBUG] Navigation visibility check:', {
-                isFileListMode,
-                selectedFilePath,
-                filePathList,
-                filePathListLength: filePathList?.length,
-                currentFileIndex,
-                shouldShow: isFileListMode && selectedFilePath && filePathList && filePathList.length > 1 && currentFileIndex >= 0
-              });
-
               return isFileListMode && selectedFilePath && filePathList && filePathList.length > 1 && currentFileIndex >= 0;
             })() && (
                 <>
@@ -1245,14 +1216,14 @@ export function FileViewerModal({
                   >
                     <ChevronLeft className="h-4 w-4" />
                   </Button>
-                  <div className="text-xs text-muted-foreground px-1">
-                    {currentFileIndex + 1} / {filePathList.length}
+                  <div className="text-xs text-muted-foreground px-2">
+                    {currentFileIndex + 1} / {(filePathList?.length || 0)}
                   </div>
                   <Button
                     variant="outline"
                     size="sm"
                     onClick={navigateNext}
-                    disabled={currentFileIndex >= filePathList.length - 1}
+                    disabled={currentFileIndex >= (filePathList?.length || 0) - 1}
                     className="h-8 w-8 p-0"
                     title="Next file (→)"
                   >
@@ -1263,8 +1234,8 @@ export function FileViewerModal({
           </div>
         </DialogHeader>
 
-        {/* Navigation Bar */}
-        <div className="px-4 py-2 border-b flex items-center gap-2">
+        {/* Breadcrumb Navigation */}
+        <div className="px-4 py-2 flex items-center gap-2 border-b">
           <Button
             variant="ghost"
             size="icon"
@@ -1287,9 +1258,9 @@ export function FileViewerModal({
 
             {currentPath !== '/workspace' && (
               <>
-                {getBreadcrumbSegments(currentPath).map((segment, index) => (
+                {getBreadcrumbSegments(currentPath).map((segment) => (
                   <Fragment key={segment.path}>
-                    <ChevronRight className="h-4 w-4 mx-1 text-muted-foreground opacity-50 flex-shrink-0" />
+                    <ChevronRight className="h-4 w-4 mx-1 text-muted-foreground flex-shrink-0" />
                     <Button
                       variant="ghost"
                       size="sm"
@@ -1305,7 +1276,7 @@ export function FileViewerModal({
 
             {selectedFilePath && (
               <>
-                <ChevronRight className="h-4 w-4 mx-1 text-muted-foreground opacity-50 flex-shrink-0" />
+                <ChevronRight className="h-4 w-4 mx-1 text-muted-foreground flex-shrink-0" />
                 <div className="flex items-center gap-2">
                   <span className="text-sm font-medium truncate">
                     {selectedFilePath.split('/').pop()}
@@ -1318,6 +1289,38 @@ export function FileViewerModal({
           <div className="flex items-center gap-2 flex-shrink-0">
             {selectedFilePath && (
               <>
+                {/* Copy content button - only show for text files */}
+                {textContentForRenderer && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={handleCopyContent}
+                    disabled={isCopyingContent || isCachedFileLoading}
+                    className="h-8 gap-1"
+                  >
+                    {isCopyingContent ? (
+                      <Check className="h-4 w-4" />
+                    ) : (
+                      <Copy className="h-4 w-4" />
+                    )}
+                    <span className="hidden sm:inline">Copy</span>
+                  </Button>
+                )}
+                
+                {/* Edit button - only show for document files that are TipTap format */}
+                {isDocumentFile(selectedFilePath) && textContentForRenderer && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={handleOpenEditor}
+                    disabled={isCachedFileLoading}
+                    className="h-8 gap-1"
+                  >
+                    <Edit className="h-4 w-4" />
+                    <span className="hidden sm:inline">Edit</span>
+                  </Button>
+                )}
+
                 <Button
                   variant="outline"
                   size="sm"
@@ -1333,7 +1336,6 @@ export function FileViewerModal({
                   <span className="hidden sm:inline">Download</span>
                 </Button>
 
-                {/* Replace the Export as PDF button with a dropdown */}
                 {isMarkdownFile(selectedFilePath) && (
                   <DropdownMenu>
                     <DropdownMenuTrigger asChild>
@@ -1431,28 +1433,28 @@ export function FileViewerModal({
                 <div className="h-full w-full flex flex-col items-center justify-center">
                   <Loader className="h-8 w-8 animate-spin text-primary mb-3" />
                   <p className="text-sm text-muted-foreground">
-                    Loading file{selectedFilePath ? `: ${selectedFilePath.split('/').pop()}` : '...'}
+                    Loading {selectedFilePath ? selectedFilePath.split('/').pop() : 'file'}
                   </p>
-                  <p className="text-xs text-muted-foreground/70 mt-1">
-                    {(() => {
-                      // Normalize the path for consistent cache checks
-                      if (!selectedFilePath) return "Preparing...";
+                  <p className="text-xs text-muted-foreground mt-1">
+                        {(() => {
+                          // Normalize the path for consistent cache checks
+                          if (!selectedFilePath) return "Preparing...";
 
-                      let normalizedPath = selectedFilePath;
-                      if (!normalizedPath.startsWith('/workspace')) {
-                        normalizedPath = `/workspace/${normalizedPath.startsWith('/') ? normalizedPath.substring(1) : normalizedPath}`;
-                      }
+                          let normalizedPath = selectedFilePath;
+                          if (!normalizedPath.startsWith('/workspace')) {
+                            normalizedPath = `/workspace/${normalizedPath.startsWith('/') ? normalizedPath.substring(1) : normalizedPath}`;
+                          }
 
-                      // Detect the appropriate content type based on file extension
-                      const detectedContentType = FileCache.getContentTypeFromPath(normalizedPath);
+                          // Detect the appropriate content type based on file extension
+                          const detectedContentType = FileCache.getContentTypeFromPath(normalizedPath);
 
-                      // Check for cache with the correct content type
-                      const isCached = FileCache.has(`${sandboxId}:${normalizedPath}:${detectedContentType}`);
+                          // Check for cache with the correct content type
+                          const isCached = FileCache.has(`${sandboxId}:${normalizedPath}:${detectedContentType}`);
 
-                      return isCached
-                        ? "Using cached version"
-                        : "Fetching from server";
-                    })()}
+                          return isCached
+                            ? "Using cached version"
+                            : "Fetching from server";
+                        })()}
                   </p>
                 </div>
               ) : contentError ? (
@@ -1498,7 +1500,7 @@ export function FileViewerModal({
                     const isImageFile = FileCache.isImageFile(selectedFilePath);
                     const isPdfFile = FileCache.isPdfFile(selectedFilePath);
                     const extension = selectedFilePath?.split('.').pop()?.toLowerCase();
-                    const isOfficeFile = ['xlsx', 'xls', 'docx', 'doc', 'pptx', 'ppt'].includes(extension || '');
+                    const isOfficeFile = ['xlsx', 'xls', 'docx', 'pptx', 'ppt'].includes(extension || '');
                     const isBinaryFile = isImageFile || isPdfFile || isOfficeFile;
 
                     // For binary files, only render if we have a blob URL
@@ -1517,7 +1519,8 @@ export function FileViewerModal({
                         key={selectedFilePath}
                         content={isBinaryFile ? null : textContentForRenderer}
                         binaryUrl={blobUrlForRenderer}
-                        fileName={selectedFilePath}
+                        fileName={selectedFilePath?.split('/').pop() || selectedFilePath}
+                        filePath={selectedFilePath}
                         className="h-full w-full"
                         project={projectWithSandbox}
                         markdownRef={
@@ -1551,15 +1554,12 @@ export function FileViewerModal({
                     {files.map((file) => (
                       <button
                         key={file.path}
-                        className={`flex flex-col items-center p-3 rounded-lg border hover:bg-muted/50 transition-colors ${selectedFilePath === file.path
+                        className={`flex flex-col items-center p-3 rounded-2xl border hover:bg-muted/50 transition-colors ${selectedFilePath === file.path
                           ? 'bg-muted border-primary/20'
                           : ''
                           }`}
                         onClick={() => {
                           if (file.is_dir) {
-                            console.log(
-                              `[FILE VIEWER] Folder clicked: ${file.name}, path: ${file.path}`,
-                            );
                             navigateToFolder(file);
                           } else {
                             openFile(file);
@@ -1586,5 +1586,18 @@ export function FileViewerModal({
         </div>
       </DialogContent>
     </Dialog>
+    
+    {/* TipTap Document Editor Modal */}
+    {selectedFilePath && isDocumentFile(selectedFilePath) && editorDocumentData && (
+      <TipTapDocumentModal
+        open={isEditorOpen}
+        onOpenChange={setIsEditorOpen}
+        filePath={selectedFilePath}
+        documentData={editorDocumentData}
+        sandboxId={sandboxId}
+        onSave={handleDocumentSave}
+      />
+    )}
+    </>
   );
 }

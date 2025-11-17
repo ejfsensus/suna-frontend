@@ -1,4 +1,4 @@
-import { Project } from '@/lib/api';
+import { Project } from '@/lib/api/projects';
 
 export interface ToolViewProps {
   assistantContent?: string;
@@ -14,6 +14,7 @@ export interface ToolViewProps {
   currentIndex?: number;
   totalCalls?: number;
   onFileClick?: (filePath: string) => void;
+  viewToggle?: React.ReactNode;
 }
 
 export interface BrowserToolViewProps extends ToolViewProps {

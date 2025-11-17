@@ -40,15 +40,35 @@ const extractFromNewFormat = (content: any): WebSearchData => {
     }
     parsedOutput = parsedOutput || {};
 
+    // Handle both single and batch image search responses
+    let images: string[] = [];
+    let query = args.query || parsedOutput?.query || null;
+    
+    if (parsedOutput?.batch_results && Array.isArray(parsedOutput.batch_results)) {
+      // Batch response: flatten all images from all queries
+      images = parsedOutput.batch_results.reduce((acc: string[], result: any) => {
+        return acc.concat(result.images || []);
+      }, []);
+      
+      // Create combined query string for display
+      const queries = parsedOutput.batch_results.map((r: any) => r.query).filter(Boolean);
+      if (queries.length > 0) {
+        query = queries.length > 1 ? `${queries.length} queries: ${queries.join(', ')}` : queries[0];
+      }
+    } else {
+      // Single response
+      images = parsedOutput?.images || [];
+    }
+
     const extractedData = {
-      query: args.query || parsedOutput?.query || null,
+      query,
       results: parsedOutput?.results?.map((result: any) => ({
         title: result.title || '',
         url: result.url || '',
         snippet: result.content || result.snippet || ''
       })) || [],
       answer: parsedOutput?.answer || null,
-      images: parsedOutput?.images || [],
+      images,
       success: toolExecution.result?.success,
       timestamp: toolExecution.execution_details?.timestamp
     };
@@ -68,12 +88,6 @@ const extractFromLegacyFormat = (content: any): Omit<WebSearchData, 'success' | 
   
   if (toolData.toolResult) {
     const args = toolData.arguments || {};
-    
-    console.log('WebSearchToolView: Extracted from legacy format (extractToolData):', {
-      query: toolData.query || args.query,
-      resultsCount: 0 
-    });
-    
     return {
       query: toolData.query || args.query || null,
       results: [], 
@@ -83,11 +97,6 @@ const extractFromLegacyFormat = (content: any): Omit<WebSearchData, 'success' | 
   }
 
   const legacyQuery = extractSearchQuery(content);
-  
-  console.log('WebSearchToolView: Extracted from legacy format (fallback):', {
-    query: legacyQuery,
-    resultsCount: 0 
-  });
   
   return {
     query: legacyQuery,
@@ -123,21 +132,6 @@ export function extractWebSearchData(
   const assistantNewFormat = extractFromNewFormat(assistantContent);
   const toolNewFormat = extractFromNewFormat(toolContent);
 
-  console.log('WebSearchToolView: Format detection results:', {
-    assistantNewFormat: {
-      hasQuery: !!assistantNewFormat.query,
-      resultsCount: assistantNewFormat.results.length,
-      hasAnswer: !!assistantNewFormat.answer,
-      imagesCount: assistantNewFormat.images.length
-    },
-    toolNewFormat: {
-      hasQuery: !!toolNewFormat.query,
-      resultsCount: toolNewFormat.results.length,
-      hasAnswer: !!toolNewFormat.answer,
-      imagesCount: toolNewFormat.images.length
-    }
-  });
-
   if (assistantNewFormat.query || assistantNewFormat.results.length > 0) {
     query = assistantNewFormat.query;
     searchResults = assistantNewFormat.results;
@@ -149,7 +143,6 @@ export function extractWebSearchData(
     if (assistantNewFormat.timestamp) {
       actualAssistantTimestamp = assistantNewFormat.timestamp;
     }
-    console.log('WebSearchToolView: Using assistant new format data');
   } else if (toolNewFormat.query || toolNewFormat.results.length > 0) {
     query = toolNewFormat.query;
     searchResults = toolNewFormat.results;
@@ -161,7 +154,6 @@ export function extractWebSearchData(
     if (toolNewFormat.timestamp) {
       actualToolTimestamp = toolNewFormat.timestamp;
     }
-    console.log('WebSearchToolView: Using tool new format data');
   } else {
     const assistantLegacy = extractFromLegacyFormat(assistantContent);
     const toolLegacy = extractFromLegacyFormat(toolContent);
@@ -170,12 +162,6 @@ export function extractWebSearchData(
     
     const legacyResults = extractSearchResults(toolContent);
     searchResults = legacyResults;
-    
-    console.log('WebSearchToolView: Using legacy format data:', {
-      query,
-      legacyResultsCount: legacyResults.length,
-      firstLegacyResult: legacyResults[0]
-    });
     
     if (toolContent) {
       try {
@@ -191,7 +177,14 @@ export function extractWebSearchData(
         if (parsedContent.answer && typeof parsedContent.answer === 'string') {
           answer = parsedContent.answer;
         }
-        if (parsedContent.images && Array.isArray(parsedContent.images)) {
+        
+        // Handle both single and batch image responses in legacy format
+        if (parsedContent.batch_results && Array.isArray(parsedContent.batch_results)) {
+          // Batch response: flatten all images from all queries
+          images = parsedContent.batch_results.reduce((acc: string[], result: any) => {
+            return acc.concat(result.images || []);
+          }, []);
+        } else if (parsedContent.images && Array.isArray(parsedContent.images)) {
           images = parsedContent.images;
         }
       } catch (e) {
@@ -206,17 +199,7 @@ export function extractWebSearchData(
   if (searchResults.length === 0) {
     const fallbackResults = extractSearchResults(toolContent);
     searchResults = fallbackResults;
-    console.log('WebSearchToolView: Fallback extraction results:', fallbackResults.length);
   }
-
-  console.log('WebSearchToolView: Final extracted data:', {
-    query,
-    searchResultsCount: searchResults.length,
-    hasAnswer: !!answer,
-    imagesCount: images.length,
-    actualIsSuccess,
-    firstResult: searchResults[0]
-  });
 
   return {
     query,

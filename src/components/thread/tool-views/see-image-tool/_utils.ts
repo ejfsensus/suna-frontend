@@ -45,19 +45,37 @@ const extractFromNewFormat = (content: any): {
       }
     }
 
+    // Extract display file path from structured output, fall back to args
+    let filePath = args.file_path || null;
+    const rawOutput = toolExecution.result?.output;
+    
+    // Check if output has display_file_path (handles both object and string formats)
+    if (rawOutput) {
+      let outputData = rawOutput;
+      console.log('outputData', outputData);
+      
+      // Parse string output if needed
+      if (typeof rawOutput === 'string') {
+        try {
+          outputData = JSON.parse(rawOutput);
+        } catch (e) {
+          // Not JSON, keep original
+        }
+      }
+      
+      // Use display_file_path if available
+      if (outputData && typeof outputData === 'object' && outputData.file_path) {
+        filePath = outputData.file_path;
+      }
+    }
+
     const extractedData = {
-      filePath: args.file_path || null,
+      filePath,
       description: parsedContent.summary || null,
       success: toolExecution.result?.success,
       timestamp: toolExecution.execution_details?.timestamp,
       output: typeof toolExecution.result?.output === 'string' ? toolExecution.result.output : null
     };
-
-    console.log('SeeImageToolView: Extracted from new format:', {
-      filePath: extractedData.filePath,
-      hasDescription: !!extractedData.description,
-      success: extractedData.success
-    });
     
     return extractedData;
   }
@@ -87,17 +105,15 @@ function extractImageFilePath(content: string | object | undefined | null): stri
   const contentStr = normalizeContentToString(content);
   if (!contentStr) return null;
   
-  console.log('Extracting file path from content:', contentStr);
-  
   try {
     const parsedContent = JSON.parse(contentStr);
     if (parsedContent.content && typeof parsedContent.content === 'string') {
       const nestedContentStr = parsedContent.content;
-      let filePathMatch = nestedContentStr.match(/<see-image\s+file_path=["']([^"']+)["'][^>]*><\/see-image>/i);
+      let filePathMatch = nestedContentStr.match(/<load-image\s+file_path=["']([^"']+)["'][^>]*><\/load-image>/i);
       if (filePathMatch) {
         return cleanImagePath(filePathMatch[1]);
       }
-      filePathMatch = nestedContentStr.match(/<see-image[^>]*>([^<]+)<\/see-image>/i);
+      filePathMatch = nestedContentStr.match(/<load-image[^>]*>([^<]+)<\/load-image>/i);
       if (filePathMatch) {
         return cleanImagePath(filePathMatch[1]);
       }
@@ -105,11 +121,11 @@ function extractImageFilePath(content: string | object | undefined | null): stri
   } catch (e) {
   }
   
-  let filePathMatch = contentStr.match(/<see-image\s+file_path=["']([^"']+)["'][^>]*><\/see-image>/i);
+  let filePathMatch = contentStr.match(/<load-image\s+file_path=["']([^"']+)["'][^>]*><\/load-image>/i);
   if (filePathMatch) {
     return cleanImagePath(filePathMatch[1]);
   }
-  filePathMatch = contentStr.match(/<see-image[^>]*>([^<]+)<\/see-image>/i);
+  filePathMatch = contentStr.match(/<load-image[^>]*>([^<]+)<\/load-image>/i);
   if (filePathMatch) {
     return cleanImagePath(filePathMatch[1]);
   }
@@ -123,8 +139,6 @@ function extractImageFilePath(content: string | object | undefined | null): stri
   if (extensionMatch) {
     return cleanImagePath(extensionMatch[1]);
   }
-
-  console.log('No file path found in assistant content');
   return null;
 }
 
@@ -135,7 +149,7 @@ function extractImageDescription(content: string | object | undefined | null): s
   try {
     const parsedContent = JSON.parse(contentStr);
     if (parsedContent.content && typeof parsedContent.content === 'string') {
-      const parts = parsedContent.content.split(/<see-image/i);
+      const parts = parsedContent.content.split(/<load-image/i);
       if (parts.length > 1) {
         return parts[0].trim();
       }
@@ -143,7 +157,7 @@ function extractImageDescription(content: string | object | undefined | null): s
   } catch (e) {
   }
 
-  const parts = contentStr.split(/<see-image/i);
+  const parts = contentStr.split(/<load-image/i);
   if (parts.length > 1) {
     return parts[0].trim();
   }
@@ -155,8 +169,6 @@ function parseToolResult(content: string | object | undefined | null): { success
   const contentStr = normalizeContentToString(content);
   if (!contentStr) return { success: false, message: 'No tool result available' };
   
-  console.log('Parsing tool result content:', contentStr);
-
   try {
     let contentToProcess = contentStr;
     
@@ -168,7 +180,7 @@ function parseToolResult(content: string | object | undefined | null): { success
     } catch (e) {
     }
 
-    const toolResultPattern = /<tool_result>\s*<see-image>\s*ToolResult\(([^)]+)\)\s*<\/see-image>\s*<\/tool_result>/;
+    const toolResultPattern = /<tool_result>\s*<load-image>\s*ToolResult\(([^)]+)\)\s*<\/load-image>\s*<\/tool_result>/;
     const toolResultMatch = contentToProcess.match(toolResultPattern);
     
     if (toolResultMatch) {
@@ -183,14 +195,13 @@ function parseToolResult(content: string | object | undefined | null): { success
         const filePathMatch = message.match(/Successfully loaded the image ['"]([^'"]+)['"]/i);
         if (filePathMatch && filePathMatch[1]) {
           filePath = filePathMatch[1];
-          console.log('Found file path in tool result:', filePath);
         }
       }
       
       return { success, message, filePath };
     }
     
-    const directToolResultMatch = contentToProcess.match(/<tool_result>\s*<see-image>\s*([^<]+)<\/see-image>\s*<\/tool_result>/);
+    const directToolResultMatch = contentToProcess.match(/<tool_result>\s*<load-image>\s*([^<]+)<\/load-image>\s*<\/tool_result>/);
     if (directToolResultMatch) {
       const resultContent = directToolResultMatch[1];
       const success = resultContent.includes('success=True') || resultContent.includes('Successfully');
@@ -199,7 +210,6 @@ function parseToolResult(content: string | object | undefined | null): { success
                            resultContent.match(/Successfully loaded the image ['"]([^'"]+)['"]/i);
       
       const filePath = filePathMatch ? filePathMatch[1] : undefined;
-      console.log('Found file path in direct tool result:', filePath);
       
       return { 
         success, 
@@ -232,10 +242,6 @@ const extractFromLegacyFormat = (content: any): {
   const toolData = extractToolData(content);
   
   if (toolData.toolResult && toolData.arguments) {
-    console.log('SeeImageToolView: Extracted from legacy format (extractToolData):', {
-      filePath: toolData.arguments.file_path
-    });
-    
     return {
       filePath: toolData.arguments.file_path || null,
       description: null
@@ -249,11 +255,6 @@ const extractFromLegacyFormat = (content: any): {
 
   const filePath = extractImageFilePath(contentStr);
   const description = extractImageDescription(contentStr);
-  
-  console.log('SeeImageToolView: Extracted from legacy format (manual parsing):', {
-    filePath,
-    hasDescription: !!description
-  });
   
   return { filePath, description };
 };
@@ -282,39 +283,27 @@ export function extractSeeImageData(
   const assistantNewFormat = extractFromNewFormat(assistantContent);
   const toolNewFormat = extractFromNewFormat(toolContent);
 
-  console.log('SeeImageToolView: Format detection results:', {
-    assistantNewFormat: {
-      hasFilePath: !!assistantNewFormat.filePath,
-      hasDescription: !!assistantNewFormat.description
-    },
-    toolNewFormat: {
-      hasFilePath: !!toolNewFormat.filePath,
-      hasDescription: !!toolNewFormat.description
-    }
-  });
 
   if (assistantNewFormat.filePath || assistantNewFormat.description) {
     filePath = assistantNewFormat.filePath;
     description = assistantNewFormat.description;
-    output = assistantNewFormat.output;
+    output = assistantNewFormat.output ?? null;
     if (assistantNewFormat.success !== undefined) {
       actualIsSuccess = assistantNewFormat.success;
     }
     if (assistantNewFormat.timestamp) {
       actualAssistantTimestamp = assistantNewFormat.timestamp;
     }
-    console.log('SeeImageToolView: Using assistant new format data');
   } else if (toolNewFormat.filePath || toolNewFormat.description) {
     filePath = toolNewFormat.filePath;
     description = toolNewFormat.description;
-    output = toolNewFormat.output;
+    output = toolNewFormat.output ?? null;
     if (toolNewFormat.success !== undefined) {
       actualIsSuccess = toolNewFormat.success;
     }
     if (toolNewFormat.timestamp) {
       actualToolTimestamp = toolNewFormat.timestamp;
     }
-    console.log('SeeImageToolView: Using tool new format data');
   } else {
     // Fall back to legacy format parsing
     const assistantLegacy = extractFromLegacyFormat(assistantContent);
@@ -331,20 +320,7 @@ export function extractSeeImageData(
     if (toolResult.message && !output) {
       output = toolResult.message;
     }
-    
-    console.log('SeeImageToolView: Using legacy format data:', {
-      filePath,
-      hasDescription: !!description,
-      hasOutput: !!output
-    });
   }
-
-  console.log('SeeImageToolView: Final extracted data:', {
-    filePath,
-    hasDescription: !!description,
-    hasOutput: !!output,
-    actualIsSuccess
-  });
 
   return {
     filePath,
@@ -364,6 +340,13 @@ export function constructImageUrl(filePath: string, project?: { sandbox?: { sand
   }
 
   const cleanPath = filePath.replace(/^['"](.*)['"]$/, '$1');
+  
+  // Check if it's a URL first, before trying to construct sandbox paths
+  if (cleanPath.startsWith('http')) {
+    return cleanPath;
+  }
+  
+  // PREFER backend API (requires authentication but more reliable)
   const sandboxId = typeof project?.sandbox === 'string' 
     ? project.sandbox 
     : project?.sandbox?.id;
@@ -378,6 +361,7 @@ export function constructImageUrl(filePath: string, project?: { sandbox?: { sand
     return apiEndpoint;
   }
   
+  // Fallback to sandbox_url for direct access
   if (project?.sandbox?.sandbox_url) {
     const sandboxUrl = project.sandbox.sandbox_url.replace(/\/$/, '');
     let normalizedPath = cleanPath;
@@ -386,12 +370,7 @@ export function constructImageUrl(filePath: string, project?: { sandbox?: { sand
     }
     
     const fullUrl = `${sandboxUrl}${normalizedPath}`;
-    console.log('Constructed sandbox URL:', fullUrl);
     return fullUrl;
-  }
-  
-  if (cleanPath.startsWith('http')) {
-    return cleanPath;
   }
   
   console.warn('No sandbox URL or ID available, using path as-is:', cleanPath);

@@ -1,14 +1,12 @@
-import { agentPlaygroundFlagFrontend } from '@/flags';
-import { isFlagEnabled } from '@/lib/feature-flags';
 import { Metadata } from 'next';
 import { redirect } from 'next/navigation';
 
 export const metadata: Metadata = {
-  title: 'Agent Conversation | Kortix Suna',
-  description: 'Interactive agent conversation powered by Kortix Suna',
+  title: 'Agent Conversation | Kortix',
+  description: 'Interactive agent conversation powered by Kortix',
   openGraph: {
-    title: 'Agent Conversation | Kortix Suna',
-    description: 'Interactive agent conversation powered by Kortix Suna',
+    title: 'Agent Conversation | Kortix',
+    description: 'Interactive agent conversation powered by Kortix',
     type: 'website',
   },
 };

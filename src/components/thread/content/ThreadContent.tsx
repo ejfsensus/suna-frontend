@@ -1,12 +1,10 @@
-import React, { useRef, useState, useCallback } from 'react';
-import { ArrowDown, CircleDashed, CheckCircle, AlertTriangle } from 'lucide-react';
-import { Button } from '@/components/ui/button';
-import { Markdown } from '@/components/ui/markdown';
+import React, { useRef, useState, useCallback, useEffect, useMemo } from 'react';
+import { CircleDashed, CheckCircle, AlertTriangle } from 'lucide-react';
 import { UnifiedMessage, ParsedContent, ParsedMetadata } from '@/components/thread/types';
 import { FileAttachmentGrid } from '@/components/thread/file-attachment';
-import { useFilePreloader, FileCache } from '@/hooks/react-query/files';
+import { useFilePreloader } from '@/hooks/files';
 import { useAuth } from '@/components/AuthProvider';
-import { Project } from '@/lib/api';
+import { Project } from '@/lib/api/projects';
 import {
     extractPrimaryParam,
     getToolIcon,
@@ -15,62 +13,94 @@ import {
 } from '@/components/thread/utils';
 import { KortixLogo } from '@/components/sidebar/kortix-logo';
 import { AgentLoader } from './loader';
-import { parseXmlToolCalls, isNewXmlFormat, extractToolNameFromStream } from '@/components/thread/tool-views/xml-parser';
-import { parseToolResult } from '@/components/thread/tool-views/tool-result-parser';
+import { AgentAvatar, AgentName } from './agent-avatar';
+import { parseXmlToolCalls, isNewXmlFormat } from '@/components/thread/tool-views/xml-parser';
+import { ShowToolStream } from './ShowToolStream';
+import { ComposioUrlDetector } from './composio-url-detector';
+import { StreamingText } from './StreamingText';
+import { HIDE_STREAMING_XML_TAGS } from '@/components/thread/utils';
+import { useAgentsFromCache } from '@/hooks/agents/use-agents';
 
-// Define the set of  tags whose raw XML should be hidden during streaming
-const HIDE_STREAMING_XML_TAGS = new Set([
-    'execute-command',
-    'create-file',
-    'delete-file',
-    'full-file-rewrite',
-    'str-replace',
-    'browser-click-element',
-    'browser-close-tab',
-    'browser-drag-drop',
-    'browser-get-dropdown-options',
-    'browser-go-back',
-    'browser-input-text',
-    'browser-navigate-to',
-    'browser-scroll-down',
-    'browser-scroll-to-text',
-    'browser-scroll-up',
-    'browser-select-dropdown-option',
-    'browser-send-keys',
-    'browser-switch-tab',
-    'browser-wait',
-    'deploy',
-    'ask',
-    'complete',
-    'crawl-webpage',
-    'web-search',
-    'see-image',
-    'call-mcp-tool',
 
-    'execute_data_provider_call',
-    'execute_data_provider_endpoint',
-
-    'execute-data-provider-call',
-    'execute-data-provider-endpoint',
-]);
-
-// Helper function to render attachments (keeping original implementation for now)
-export function renderAttachments(attachments: string[], fileViewerHandler?: (filePath?: string, filePathList?: string[]) => void, sandboxId?: string, project?: Project) {
+// Helper function to render all attachments as standalone messages
+export function renderStandaloneAttachments(attachments: string[], fileViewerHandler?: (filePath?: string, filePathList?: string[]) => void, sandboxId?: string, project?: Project, alignRight: boolean = false) {
     if (!attachments || attachments.length === 0) return null;
 
-    // Note: Preloading is now handled by React Query in the main ThreadContent component
-    // to avoid duplicate requests with different content types
+    // Filter out empty strings and check if we have any valid attachments
+    const validAttachments = attachments.filter(attachment => attachment && attachment.trim() !== '');
+    if (validAttachments.length === 0) return null;
 
-    return <FileAttachmentGrid
-        attachments={attachments}
-        onFileClick={fileViewerHandler}
-        showPreviews={true}
-        sandboxId={sandboxId}
-        project={project}
-    />;
+    return (
+        <div className="w-full my-4">
+            <FileAttachmentGrid
+                attachments={validAttachments}
+                onFileClick={fileViewerHandler}
+                showPreviews={true}
+                sandboxId={sandboxId}
+                project={project}
+                standalone={true}
+                alignRight={alignRight}
+            />
+        </div>
+    );
+}
+
+// Helper function for legacy compatibility (now just returns null since all files are standalone)
+export function renderAttachments(attachments: string[], fileViewerHandler?: (filePath?: string, filePathList?: string[]) => void, sandboxId?: string, project?: Project) {
+    // All attachments are now rendered as standalone, so this returns null
+    return null;
 }
 
 // Render Markdown content while preserving XML tags that should be displayed as tool calls
+function preprocessTextOnlyTools(content: string): string {
+    if (!content || typeof content !== 'string') {
+        return content || '';
+    }
+
+    // For ask/complete tools, we need to preserve them if they have attachments
+    // Only strip them if they don't have attachments parameter
+
+    // Handle new function calls format - only strip if no attachments
+    content = content.replace(/<function_calls>\s*<invoke name="ask">\s*<parameter name="text">([\s\S]*?)<\/parameter>\s*<\/invoke>\s*<\/function_calls>/gi, (match) => {
+        if (match.includes('<parameter name="attachments"')) return match;
+        return match.replace(/<function_calls>\s*<invoke name="ask">\s*<parameter name="text">([\s\S]*?)<\/parameter>\s*<\/invoke>\s*<\/function_calls>/gi, '$1');
+    });
+
+    content = content.replace(/<function_calls>\s*<invoke name="complete">\s*<parameter name="text">([\s\S]*?)<\/parameter>\s*<\/invoke>\s*<\/function_calls>/gi, (match) => {
+        if (match.includes('<parameter name="attachments"')) return match;
+        return match.replace(/<function_calls>\s*<invoke name="complete">\s*<parameter name="text">([\s\S]*?)<\/parameter>\s*<\/invoke>\s*<\/function_calls>/gi, '$1');
+    });
+
+    content = content.replace(/<function_calls>\s*<invoke name="present_presentation">[\s\S]*?<parameter name="text">([\s\S]*?)<\/parameter>[\s\S]*?<\/invoke>\s*<\/function_calls>/gi, '$1');
+
+    // Handle streaming/partial XML for message tools - only strip if no attachments visible yet
+    content = content.replace(/<function_calls>\s*<invoke name="ask">\s*<parameter name="text">([\s\S]*?)$/gi, (match) => {
+        if (match.includes('<parameter name="attachments"')) return match;
+        return match.replace(/<function_calls>\s*<invoke name="ask">\s*<parameter name="text">([\s\S]*?)$/gi, '$1');
+    });
+
+    content = content.replace(/<function_calls>\s*<invoke name="complete">\s*<parameter name="text">([\s\S]*?)$/gi, (match) => {
+        if (match.includes('<parameter name="attachments"')) return match;
+        return match.replace(/<function_calls>\s*<invoke name="complete">\s*<parameter name="text">([\s\S]*?)$/gi, '$1');
+    });
+
+    content = content.replace(/<function_calls>\s*<invoke name="present_presentation">[\s\S]*?<parameter name="text">([\s\S]*?)$/gi, '$1');
+
+    // Also handle old format - only strip if no attachments attribute
+    content = content.replace(/<ask[^>]*>([\s\S]*?)<\/ask>/gi, (match) => {
+        if (match.match(/<ask[^>]*attachments=/i)) return match;
+        return match.replace(/<ask[^>]*>([\s\S]*?)<\/ask>/gi, '$1');
+    });
+
+    content = content.replace(/<complete[^>]*>([\s\S]*?)<\/complete>/gi, (match) => {
+        if (match.match(/<complete[^>]*attachments=/i)) return match;
+        return match.replace(/<complete[^>]*>([\s\S]*?)<\/complete>/gi, '$1');
+    });
+
+    content = content.replace(/<present_presentation[^>]*>([\s\S]*?)<\/present_presentation>/gi, '$1');
+    return content;
+}
+
 export function renderMarkdownContent(
     content: string,
     handleToolClick: (assistantMessageId: string | null, toolName: string) => void,
@@ -80,6 +110,9 @@ export function renderMarkdownContent(
     project?: Project,
     debugMode?: boolean
 ) {
+    // Preprocess content to convert text-only tools to natural text
+    content = preprocessTextOnlyTools(content);
+
     // If in debug mode, just display raw content in a pre tag
     if (debugMode) {
         return (
@@ -89,53 +122,86 @@ export function renderMarkdownContent(
         );
     }
 
-    // Check if content contains the new Cursor-style format
     if (isNewXmlFormat(content)) {
         const contentParts: React.ReactNode[] = [];
         let lastIndex = 0;
-        
+
         // Find all function_calls blocks
         const functionCallsRegex = /<function_calls>([\s\S]*?)<\/function_calls>/gi;
-        let match;
-        
+        let match: RegExpExecArray | null = null;
+
         while ((match = functionCallsRegex.exec(content)) !== null) {
             // Add text before the function_calls block
             if (match.index > lastIndex) {
                 const textBeforeBlock = content.substring(lastIndex, match.index);
                 if (textBeforeBlock.trim()) {
                     contentParts.push(
-                        <Markdown key={`md-${lastIndex}`} className="text-sm prose prose-sm dark:prose-invert chat-markdown max-w-none break-words">
-                            {textBeforeBlock}
-                        </Markdown>
+                        <ComposioUrlDetector key={`md-${lastIndex}`} content={textBeforeBlock} className="text-sm prose prose-sm dark:prose-invert chat-markdown max-w-none break-words" />
                     );
                 }
             }
-            
+
             // Parse the tool calls in this block
             const toolCalls = parseXmlToolCalls(match[0]);
-            
+
             toolCalls.forEach((toolCall, index) => {
                 const toolName = toolCall.functionName.replace(/_/g, '-');
-                
+
                 if (toolName === 'ask') {
                     // Handle ask tool specially - extract text and attachments
                     const askText = toolCall.parameters.text || '';
                     const attachments = toolCall.parameters.attachments || [];
-                    
+
                     // Convert single attachment to array for consistent handling
-                    const attachmentArray = Array.isArray(attachments) ? attachments : 
-                                          (typeof attachments === 'string' ? attachments.split(',').map(a => a.trim()) : []);
-                    
+                    const attachmentArray = Array.isArray(attachments) ? attachments :
+                        (typeof attachments === 'string' ? attachments.split(',').map(a => a.trim()) : []);
+
                     // Render ask tool content with attachment UI
                     contentParts.push(
                         <div key={`ask-${match.index}-${index}`} className="space-y-3">
-                            <Markdown className="text-sm prose prose-sm dark:prose-invert chat-markdown max-w-none break-words [&>:first-child]:mt-0 prose-headings:mt-3">{askText}</Markdown>
+                            <ComposioUrlDetector content={askText} className="text-sm prose prose-sm dark:prose-invert chat-markdown max-w-none break-words [&>:first-child]:mt-0 prose-headings:mt-3" />
                             {renderAttachments(attachmentArray, fileViewerHandler, sandboxId, project)}
                         </div>
                     );
+
+                    // Also render standalone attachments outside the message
+                    const standaloneAttachments = renderStandaloneAttachments(attachmentArray, fileViewerHandler, sandboxId, project);
+                    if (standaloneAttachments) {
+                        contentParts.push(
+                            <div key={`ask-func-attachments-${match.index}-${index}`}>
+                                {standaloneAttachments}
+                            </div>
+                        );
+                    }
+                } else if (toolName === 'complete') {
+                    // Handle complete tool specially - extract text and attachments
+                    const completeText = toolCall.parameters.text || '';
+                    const attachments = toolCall.parameters.attachments || '';
+
+                    // Convert single attachment to array for consistent handling
+                    const attachmentArray = Array.isArray(attachments) ? attachments :
+                        (typeof attachments === 'string' ? attachments.split(',').map(a => a.trim()) : []);
+
+                    // Render complete tool content with attachment UI
+                    contentParts.push(
+                        <div key={`complete-${match.index}-${index}`} className="space-y-3">
+                            <ComposioUrlDetector content={completeText} className="text-sm prose prose-sm dark:prose-invert chat-markdown max-w-none break-words [&>:first-child]:mt-0 prose-headings:mt-3" />
+                            {renderAttachments(attachmentArray, fileViewerHandler, sandboxId, project)}
+                        </div>
+                    );
+
+                    // Also render standalone attachments outside the message
+                    const standaloneAttachments = renderStandaloneAttachments(attachmentArray, fileViewerHandler, sandboxId, project);
+                    if (standaloneAttachments) {
+                        contentParts.push(
+                            <div key={`complete-func-attachments-${match.index}-${index}`}>
+                                {standaloneAttachments}
+                            </div>
+                        );
+                    }
                 } else {
                     const IconComponent = getToolIcon(toolName);
-                    
+
                     // Extract primary parameter for display
                     let paramDisplay = '';
                     if (toolCall.parameters.file_path) {
@@ -147,51 +213,52 @@ export function renderMarkdownContent(
                     } else if (toolCall.parameters.url) {
                         paramDisplay = toolCall.parameters.url;
                     }
-                    
+
                     contentParts.push(
-                        <div key={`tool-${match.index}-${index}`} className="my-1">
+                        <div
+                            key={`tool-${match.index}-${index}`}
+                            className="my-1"
+                        >
                             <button
                                 onClick={() => handleToolClick(messageId, toolName)}
-                                className="inline-flex items-center gap-1.5 py-1 px-1 text-xs text-muted-foreground bg-muted hover:bg-muted/80 rounded-md transition-colors cursor-pointer border border-neutral-200 dark:border-neutral-700/50"
+                                className="inline-flex items-center gap-1.5 py-1 px-1 pr-1.5 text-xs bg-card border rounded-lg transition-colors cursor-pointer hover:bg-card/80"
                             >
-                                <div className='border-2 bg-gradient-to-br from-neutral-200 to-neutral-300 dark:from-neutral-700 dark:to-neutral-800 flex items-center justify-center p-0.5 rounded-sm border-neutral-400/20 dark:border-neutral-600'>
-                                    <IconComponent className="h-3.5 w-3.5 text-muted-foreground flex-shrink-0" />
+                                <div className='border bg-gradient-to-br from-card to-background flex items-center justify-center p-0.5 rounded-sm border-border'>
+                                    <IconComponent className="h-3.5 w-3.5 text-foreground flex-shrink-0" />
                                 </div>
-                                <span className="font-mono text-xs text-foreground">{getUserFriendlyToolName(toolName)}</span>
-                                {paramDisplay && <span className="ml-1 text-muted-foreground truncate max-w-[200px]" title={paramDisplay}>{paramDisplay}</span>}
+                                <span className="text-xs text-foreground">{getUserFriendlyToolName(toolName)}</span>
+                                {paramDisplay && <span className="ml-1 text-foreground/60 truncate max-w-[200px]" title={paramDisplay}>{paramDisplay}</span>}
                             </button>
                         </div>
                     );
                 }
             });
-            
+
             lastIndex = match.index + match[0].length;
         }
-        
+
         // Add any remaining text after the last function_calls block
         if (lastIndex < content.length) {
             const remainingText = content.substring(lastIndex);
             if (remainingText.trim()) {
                 contentParts.push(
-                    <Markdown key={`md-${lastIndex}`} className="text-sm prose prose-sm dark:prose-invert chat-markdown max-w-none break-words">
-                        {remainingText}
-                    </Markdown>
+                    <ComposioUrlDetector key={`md-${lastIndex}`} content={remainingText} className="text-sm prose prose-sm dark:prose-invert chat-markdown max-w-none break-words" />
                 );
             }
         }
-        
-        return contentParts.length > 0 ? contentParts : <Markdown className="text-sm prose prose-sm dark:prose-invert chat-markdown max-w-none break-words">{content}</Markdown>;
+
+        return contentParts.length > 0 ? contentParts : <ComposioUrlDetector content={content} className="text-sm prose prose-sm dark:prose-invert chat-markdown max-w-none break-words" />;
     }
 
     // Fall back to old XML format handling
     const xmlRegex = /<(?!inform\b)([a-zA-Z\-_]+)(?:\s+[^>]*)?>(?:[\s\S]*?)<\/\1>|<(?!inform\b)([a-zA-Z\-_]+)(?:\s+[^>]*)?\/>/g;
     let lastIndex = 0;
     const contentParts: React.ReactNode[] = [];
-    let match;
+    let match: RegExpExecArray | null = null;
 
     // If no XML tags found, just return the full content as markdown
     if (!content.match(xmlRegex)) {
-        return <Markdown className="text-sm prose prose-sm dark:prose-invert chat-markdown max-w-none break-words">{content}</Markdown>;
+        return <ComposioUrlDetector content={content} className="text-sm prose prose-sm dark:prose-invert chat-markdown max-w-none break-words" />;
     }
 
     while ((match = xmlRegex.exec(content)) !== null) {
@@ -199,7 +266,7 @@ export function renderMarkdownContent(
         if (match.index > lastIndex) {
             const textBeforeTag = content.substring(lastIndex, match.index);
             contentParts.push(
-                <Markdown key={`md-${lastIndex}`} className="text-sm prose prose-sm dark:prose-invert chat-markdown max-w-none inline-block mr-1 break-words">{textBeforeTag}</Markdown>
+                <ComposioUrlDetector key={`md-${lastIndex}`} content={textBeforeTag} className="text-sm prose prose-sm dark:prose-invert chat-markdown max-w-none inline-block mr-1 break-words" />
             );
         }
 
@@ -221,29 +288,70 @@ export function renderMarkdownContent(
             // Render <ask> tag content with attachment UI (using the helper)
             contentParts.push(
                 <div key={`ask-${match.index}`} className="space-y-3">
-                    <Markdown className="text-sm prose prose-sm dark:prose-invert chat-markdown max-w-none break-words [&>:first-child]:mt-0 prose-headings:mt-3">{askContent}</Markdown>
+                    <ComposioUrlDetector content={askContent} className="text-sm prose prose-sm dark:prose-invert chat-markdown max-w-none break-words [&>:first-child]:mt-0 prose-headings:mt-3" />
                     {renderAttachments(attachments, fileViewerHandler, sandboxId, project)}
                 </div>
             );
+
+            // Also render standalone attachments outside the message
+            const standaloneAttachments = renderStandaloneAttachments(attachments, fileViewerHandler, sandboxId, project);
+            if (standaloneAttachments) {
+                contentParts.push(
+                    <div key={`ask-attachments-${match.index}`}>
+                        {standaloneAttachments}
+                    </div>
+                );
+            }
+        } else if (toolName === 'complete') {
+            // Extract attachments from the XML attributes
+            const attachmentsMatch = rawXml.match(/attachments=["']([^"']*)["']/i);
+            const attachments = attachmentsMatch
+                ? attachmentsMatch[1].split(',').map(a => a.trim())
+                : [];
+
+            // Extract content from the complete tag
+            const contentMatch = rawXml.match(/<complete[^>]*>([\s\S]*?)<\/complete>/i);
+            const completeContent = contentMatch ? contentMatch[1] : '';
+
+            // Render <complete> tag content with attachment UI (using the helper)
+            contentParts.push(
+                <div key={`complete-${match.index}`} className="space-y-3">
+                    <ComposioUrlDetector content={completeContent} className="text-sm prose prose-sm dark:prose-invert chat-markdown max-w-none break-words [&>:first-child]:mt-0 prose-headings:mt-3" />
+                    {renderAttachments(attachments, fileViewerHandler, sandboxId, project)}
+                </div>
+            );
+
+            // Also render standalone attachments outside the message
+            const standaloneAttachments = renderStandaloneAttachments(attachments, fileViewerHandler, sandboxId, project);
+            if (standaloneAttachments) {
+                contentParts.push(
+                    <div key={`complete-attachments-${match.index}`}>
+                        {standaloneAttachments}
+                    </div>
+                );
+            }
         } else {
             const IconComponent = getToolIcon(toolName);
             const paramDisplay = extractPrimaryParam(toolName, rawXml);
 
             // Render tool button as a clickable element
             contentParts.push(
-                <div key={toolCallKey} className="my-1">
+                <div
+                    key={toolCallKey}
+                    className="my-1"
+                >
                     <button
                         onClick={() => handleToolClick(messageId, toolName)}
-                        className="inline-flex items-center gap-1.5 py-1 px-1 text-xs text-muted-foreground bg-muted hover:bg-muted/80 rounded-md transition-colors cursor-pointer border border-neutral-200 dark:border-neutral-700/50"
+                        className="inline-flex items-center gap-1.5 py-1 px-1 pr-1.5 text-xs bg-card border rounded-lg transition-colors cursor-pointer hover:bg-card/80"
                     >
-                        <div className='border-2 bg-gradient-to-br from-neutral-200 to-neutral-300 dark:from-neutral-700 dark:to-neutral-800 flex items-center justify-center p-0.5 rounded-sm border-neutral-400/20 dark:border-neutral-600'>
-                            <IconComponent className="h-3.5 w-3.5 text-muted-foreground flex-shrink-0" />
+                        <div className='border bg-gradient-to-br from-card to-background flex items-center justify-center p-0.5 rounded-sm border-border'>
+                            <IconComponent className="h-3.5 w-3.5 text-foreground flex-shrink-0" />
                         </div>
-                        <span className="font-mono text-xs text-foreground">{getUserFriendlyToolName(toolName)}</span>
-                        {paramDisplay && <span className="ml-1 text-muted-foreground truncate max-w-[200px]" title={paramDisplay}>{paramDisplay}</span>}
+                        <span className="text-xs text-foreground">{getUserFriendlyToolName(toolName)}</span>
+                        {paramDisplay && <span className="ml-1 text-foreground/60 truncate max-w-[200px]" title={paramDisplay}>{paramDisplay}</span>}
                     </button>
                 </div>
-            ); 
+            );
         }
         lastIndex = xmlRegex.lastIndex;
     }
@@ -251,7 +359,7 @@ export function renderMarkdownContent(
     // Add text after the last tag
     if (lastIndex < content.length) {
         contentParts.push(
-            <Markdown key={`md-${lastIndex}`} className="text-sm prose prose-sm dark:prose-invert chat-markdown max-w-none break-words">{content.substring(lastIndex)}</Markdown>
+            <ComposioUrlDetector key={`md-${lastIndex}`} content={content.substring(lastIndex)} className="text-sm prose prose-sm dark:prose-invert chat-markdown max-w-none break-words" />
         );
     }
 
@@ -278,6 +386,10 @@ export interface ThreadContentProps {
     agentName?: string;
     agentAvatar?: React.ReactNode;
     emptyStateComponent?: React.ReactNode; // Add custom empty state component prop
+    threadMetadata?: any; // Add thread metadata prop
+    scrollContainerRef?: React.RefObject<HTMLDivElement>; // Add scroll container ref prop
+    agentMetadata?: any; // Add agent metadata prop
+    agentData?: any; // Add full agent data prop
 }
 
 export const ThreadContent: React.FC<ThreadContentProps> = ({
@@ -300,35 +412,144 @@ export const ThreadContent: React.FC<ThreadContentProps> = ({
     agentName = 'Suna',
     agentAvatar = <KortixLogo size={16} />,
     emptyStateComponent,
+    threadMetadata,
+    scrollContainerRef,
+    agentMetadata,
+    agentData,
 }) => {
-    const messagesEndRef = useRef<HTMLDivElement>(null);
     const messagesContainerRef = useRef<HTMLDivElement>(null);
     const latestMessageRef = useRef<HTMLDivElement>(null);
-    const [showScrollButton, setShowScrollButton] = useState(false);
-    const [userHasScrolled, setUserHasScrolled] = useState(false);
+    const contentRef = useRef<HTMLDivElement>(null);
+    const [shouldJustifyToTop, setShouldJustifyToTop] = useState(false);
     const { session } = useAuth();
+
+    // Collect unique agent IDs from messages to prefetch from cache
+    const agentIds = useMemo(() => {
+        const ids = new Set<string>();
+        messages.forEach(msg => {
+            if (msg.agent_id) {
+                ids.add(msg.agent_id);
+            }
+        });
+        return Array.from(ids);
+    }, [messages]);
+
+    // Get agents from cache (doesn't fetch, just reads from existing cache)
+    const agentsMap = useAgentsFromCache(agentIds);
 
     // React Query file preloader
     const { preloadFiles } = useFilePreloader();
 
-    const containerClassName = isPreviewMode 
-        ? "flex-1 overflow-y-auto scrollbar-thin scrollbar-track-secondary/0 scrollbar-thumb-primary/10 scrollbar-thumb-rounded-full hover:scrollbar-thumb-primary/10 px-6 py-4 pb-72"
-        : "flex-1 overflow-y-auto scrollbar-thin scrollbar-track-secondary/0 scrollbar-thumb-primary/10 scrollbar-thumb-rounded-full hover:scrollbar-thumb-primary/10 px-6 py-4 pb-72 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60";
+    const containerClassName = isPreviewMode
+        ? "flex-1 overflow-y-auto scrollbar-thin scrollbar-track-secondary/0 scrollbar-thumb-primary/10 scrollbar-thumb-rounded-full hover:scrollbar-thumb-primary/10 py-4 pb-0"
+        : "flex-1 overflow-y-auto scrollbar-thin scrollbar-track-secondary/0 scrollbar-thumb-primary/10 scrollbar-thumb-rounded-full hover:scrollbar-thumb-primary/10 py-4 pb-0 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60";
 
     // In playback mode, we use visibleMessages instead of messages
-    const displayMessages = readOnly && visibleMessages ? visibleMessages : messages;
+    // Filter out image_context messages (they're for LLM only, not for display)
+    const allMessages = readOnly && visibleMessages ? visibleMessages : messages;
+    const displayMessages = useMemo(() => {
+        // Use includes check to avoid type narrowing issues
+        const displayableTypes = ['user', 'assistant', 'tool', 'system', 'status', 'browser_state'];
+        return allMessages.filter(msg => displayableTypes.includes(msg.type));
+    }, [allMessages]);
 
-    const handleScroll = () => {
-        if (!messagesContainerRef.current) return;
-        const { scrollTop, scrollHeight, clientHeight } = messagesContainerRef.current;
-        const isScrolledUp = scrollHeight - scrollTop - clientHeight > 100;
-        setShowScrollButton(isScrolledUp);
-        setUserHasScrolled(isScrolledUp);
-    };
+    // Helper function to get agent info robustly
+    const getAgentInfo = useCallback(() => {
 
-    const scrollToBottom = useCallback((behavior: ScrollBehavior = 'smooth') => {
-        messagesEndRef.current?.scrollIntoView({ behavior });
+        // Check if this is a Suna default agent from metadata
+        const isSunaDefaultAgent = agentMetadata?.is_suna_default || false;
+
+        // Then check recent messages for agent info
+        const recentAssistantWithAgent = [...displayMessages].reverse().find(msg =>
+            msg.type === 'assistant' && msg.agents?.name
+        );
+
+        if (agentData && !isSunaDefaultAgent) {
+            // Use modern icon system for agent display
+            const avatar = (
+                <div className="h-5 w-5 flex items-center justify-center rounded text-xs">
+                    <KortixLogo size={16} />
+                </div>
+            );
+            return {
+                name: agentData.name || agentName,
+                avatar
+            };
+        }
+
+        if (recentAssistantWithAgent?.agents?.name) {
+            const isSunaAgent = recentAssistantWithAgent.agents.name === 'Suna' || isSunaDefaultAgent;
+            // Use modern icon system for agent display  
+            const avatar = !isSunaDefaultAgent ? (
+                <>
+                    {isSunaAgent ? (
+                        <div className="h-5 w-5 flex items-center justify-center rounded text-xs">
+                            <KortixLogo size={16} />
+                        </div>
+                    ) : (
+                        <div className="h-5 w-5 flex items-center justify-center rounded text-xs">
+                            <span className="text-lg">{recentAssistantWithAgent.agents.name.charAt(0).toUpperCase()}</span>
+                        </div>
+                    )}
+                </>
+            ) : (
+                <div className="h-5 w-5 flex items-center justify-center rounded text-xs">
+                    <KortixLogo size={16} />
+                </div>
+            );
+            return {
+                name: recentAssistantWithAgent.agents.name,
+                avatar
+            };
+        }
+
+        // Fallback: if this is a Suna default agent, always show KortixLogo
+        if (isSunaDefaultAgent) {
+            return {
+                name: agentName || 'Suna',
+                avatar: (
+                    <div className="h-5 w-5 flex items-center justify-center rounded text-xs">
+                        <KortixLogo size={16} />
+                    </div>
+                )
+            };
+        }
+
+        return {
+            name: agentName || 'Suna',
+            avatar: agentAvatar
+        };
+    }, [threadMetadata, displayMessages, agentName, agentAvatar, agentMetadata, agentData]);
+
+    // Simplified scroll handler - flex-column-reverse handles positioning
+    const handleScroll = useCallback(() => {
+        // No scroll logic needed with flex-column-reverse
     }, []);
+
+    // No scroll-to-bottom needed with flex-column-reverse
+
+    // No auto-scroll needed with flex-column-reverse - CSS handles it
+
+    // Smart justify-content based on content height
+    useEffect(() => {
+        const checkContentHeight = () => {
+            const container = (scrollContainerRef || messagesContainerRef).current;
+            const content = contentRef.current;
+            if (!container || !content) return;
+
+            const containerHeight = container.clientHeight;
+            const contentHeight = content.scrollHeight;
+            setShouldJustifyToTop(contentHeight <= containerHeight);
+        };
+
+        checkContentHeight();
+        const resizeObserver = new ResizeObserver(checkContentHeight);
+        if (contentRef.current) resizeObserver.observe(contentRef.current);
+        const containerRef = (scrollContainerRef || messagesContainerRef).current;
+        if (containerRef) resizeObserver.observe(containerRef);
+
+        return () => resizeObserver.disconnect();
+    }, [displayMessages, streamingTextContent, agentStatus, scrollContainerRef]);
 
     // Preload all message attachments when messages change or sandboxId is provided
     React.useEffect(() => {
@@ -378,13 +599,13 @@ export const ThreadContent: React.FC<ThreadContentProps> = ({
                     )}
                 </div>
             ) : (
-                // Render scrollable content container
+                // Render scrollable content container with column-reverse (or just content when external scrolling)
                 <div
-                    ref={messagesContainerRef}
-                    className={containerClassName}
-                    onScroll={handleScroll}
+                    ref={scrollContainerRef || messagesContainerRef}
+                    className={scrollContainerRef ? `${containerClassName} flex flex-col-reverse ${shouldJustifyToTop ? 'justify-end min-h-full' : ''}` : 'py-4 pb-0 overflow-auto'}
+                    onScroll={scrollContainerRef ? handleScroll : undefined}
                 >
-                    <div className="mx-auto max-w-3xl md:px-8 min-w-0">
+                    <div ref={contentRef} className="mx-auto min-w-0 w-full max-w-3xl px-4 md:px-6">
                         <div className="space-y-8 min-w-0">
                             {(() => {
 
@@ -411,14 +632,14 @@ export const ThreadContent: React.FC<ThreadContentProps> = ({
                                         groupedMessages.push({ type: 'user', messages: [message], key });
                                     } else if (messageType === 'assistant' || messageType === 'tool' || messageType === 'browser_state') {
                                         // Check if we can add to existing assistant group (same agent)
-                                        const canAddToExistingGroup = currentGroup && 
+                                        const canAddToExistingGroup = currentGroup &&
                                             currentGroup.type === 'assistant_group' &&
                                             (() => {
                                                 // For assistant messages, check if agent matches
                                                 if (messageType === 'assistant') {
                                                     const lastAssistantMsg = currentGroup.messages.findLast(m => m.type === 'assistant');
                                                     if (!lastAssistantMsg) return true; // No assistant message yet, can add
-                                                    
+
                                                     // Compare agent info - both null/undefined should be treated as same (default agent)
                                                     const currentAgentId = message.agent_id;
                                                     const lastAgentId = lastAssistantMsg.agent_id;
@@ -430,7 +651,7 @@ export const ThreadContent: React.FC<ThreadContentProps> = ({
 
                                         if (canAddToExistingGroup) {
                                             // Add to existing assistant group
-                                            currentGroup.messages.push(message);
+                                            currentGroup?.messages.push(message);
                                         } else {
                                             // Finalize any existing group
                                             if (currentGroup) {
@@ -462,7 +683,7 @@ export const ThreadContent: React.FC<ThreadContentProps> = ({
                                 const mergedGroups: MessageGroup[] = [];
                                 let currentMergedGroup: MessageGroup | null = null;
 
-                                groupedMessages.forEach((group, index) => {
+                                groupedMessages.forEach((group) => {
                                     if (group.type === 'assistant_group') {
                                         if (currentMergedGroup && currentMergedGroup.type === 'assistant_group') {
                                             // Merge with the current group
@@ -494,8 +715,13 @@ export const ThreadContent: React.FC<ThreadContentProps> = ({
                                 // Use merged groups instead of original grouped messages
                                 const finalGroupedMessages = mergedGroups;
 
-                                // Handle streaming content - only add to existing group or create new one if needed
-                                if (streamingTextContent) {
+
+                                // Helper function to add streaming content to groups
+                                const appendStreamingContent = (content: string, isPlayback: boolean = false) => {
+                                    const messageId = isPlayback ? 'playbackStreamingText' : 'streamingTextContent';
+                                    const metadata = isPlayback ? 'playbackStreamingText' : 'streamingTextContent';
+                                    const keySuffix = isPlayback ? 'playback-streaming' : 'streaming';
+
                                     const lastGroup = finalGroupedMessages.at(-1);
                                     if (!lastGroup || lastGroup.type === 'user') {
                                         // Create new assistant group for streaming content
@@ -503,35 +729,45 @@ export const ThreadContent: React.FC<ThreadContentProps> = ({
                                         finalGroupedMessages.push({
                                             type: 'assistant_group',
                                             messages: [{
-                                                content: streamingTextContent,
+                                                content,
                                                 type: 'assistant',
-                                                message_id: 'streamingTextContent',
-                                                metadata: 'streamingTextContent',
+                                                message_id: messageId,
+                                                metadata,
                                                 created_at: new Date().toISOString(),
                                                 updated_at: new Date().toISOString(),
                                                 is_llm_message: true,
-                                                thread_id: 'streamingTextContent',
+                                                thread_id: messageId,
                                                 sequence: Infinity,
                                             }],
-                                            key: `assistant-group-${assistantGroupCounter}-streaming`
+                                            key: `assistant-group-${assistantGroupCounter}-${keySuffix}`
                                         });
                                     } else if (lastGroup.type === 'assistant_group') {
                                         // Only add streaming content if it's not already represented in the last message
                                         const lastMessage = lastGroup.messages[lastGroup.messages.length - 1];
-                                        if (lastMessage.message_id !== 'streamingTextContent') {
+                                        if (lastMessage.message_id !== messageId) {
                                             lastGroup.messages.push({
-                                                content: streamingTextContent,
+                                                content,
                                                 type: 'assistant',
-                                                message_id: 'streamingTextContent',
-                                                metadata: 'streamingTextContent',
+                                                message_id: messageId,
+                                                metadata,
                                                 created_at: new Date().toISOString(),
                                                 updated_at: new Date().toISOString(),
                                                 is_llm_message: true,
-                                                thread_id: 'streamingTextContent',
+                                                thread_id: messageId,
                                                 sequence: Infinity,
                                             });
                                         }
                                     }
+                                };
+
+                                // Handle streaming content - only add to existing group or create new one if needed
+                                if (streamingTextContent) {
+                                    appendStreamingContent(streamingTextContent, false);
+                                }
+
+                                // Handle playback mode streaming text
+                                if (readOnly && streamingText && isStreamingText) {
+                                    appendStreamingContent(streamingText, true);
                                 }
 
                                 return finalGroupedMessages.map((group, groupIndex) => {
@@ -540,9 +776,33 @@ export const ThreadContent: React.FC<ThreadContentProps> = ({
                                         const messageContent = (() => {
                                             try {
                                                 const parsed = safeJsonParse<ParsedContent>(message.content, { content: message.content });
-                                                return parsed.content || message.content;
+                                                const content = parsed.content || message.content;
+
+                                                // Handle array content (multi-modal messages with images)
+                                                if (Array.isArray(content)) {
+                                                    // Extract text parts from array content
+                                                    return content
+                                                        .filter((item: any) => item.type === 'text' || typeof item === 'string')
+                                                        .map((item: any) => typeof item === 'string' ? item : item.text || '')
+                                                        .join('\n');
+                                                }
+
+                                                // Ensure we always return a string
+                                                return typeof content === 'string' ? content : JSON.stringify(content || '');
                                             } catch {
-                                                return message.content;
+                                                // Ensure message.content is a string
+                                                if (typeof message.content === 'string') {
+                                                    return message.content;
+                                                }
+                                                // Handle array content in fallback
+                                                const contentArray = message.content as any;
+                                                if (Array.isArray(contentArray)) {
+                                                    return contentArray
+                                                        .filter((item: any) => item.type === 'text' || typeof item === 'string')
+                                                        .map((item: any) => typeof item === 'string' ? item : item.text || '')
+                                                        .join('\n');
+                                                }
+                                                return JSON.stringify(message.content || '');
                                             }
                                         })();
 
@@ -550,7 +810,7 @@ export const ThreadContent: React.FC<ThreadContentProps> = ({
                                         if (debugMode) {
                                             return (
                                                 <div key={group.key} className="flex justify-end">
-                                                    <div className="flex max-w-[85%] rounded-xl bg-primary/10 px-4 py-3 break-words overflow-hidden">
+                                                    <div className="flex max-w-[85%] rounded-2xl bg-card px-4 py-3 break-words overflow-hidden">
                                                         <pre className="text-xs font-mono whitespace-pre-wrap overflow-x-auto min-w-0 flex-1">
                                                             {message.content}
                                                         </pre>
@@ -562,7 +822,7 @@ export const ThreadContent: React.FC<ThreadContentProps> = ({
                                         // Extract attachments from the message content
                                         const attachmentsMatch = messageContent.match(/\[Uploaded File: (.*?)\]/g);
                                         const attachments = attachmentsMatch
-                                            ? attachmentsMatch.map(match => {
+                                            ? attachmentsMatch.map((match: string) => {
                                                 const pathMatch = match.match(/\[Uploaded File: (.*?)\]/);
                                                 return pathMatch ? pathMatch[1] : null;
                                             }).filter(Boolean)
@@ -572,58 +832,52 @@ export const ThreadContent: React.FC<ThreadContentProps> = ({
                                         const cleanContent = messageContent.replace(/\[Uploaded File: .*?\]/g, '').trim();
 
                                         return (
-                                            <div key={group.key} className="flex justify-end">
-                                                <div className="flex max-w-[85%] rounded-xl bg-primary/10 px-4 py-3 break-words overflow-hidden">
-                                                    <div className="space-y-3 min-w-0 flex-1">
-                                                        {cleanContent && (
-                                                            <Markdown className="text-sm prose prose-sm dark:prose-invert chat-markdown max-w-none [&>:first-child]:mt-0 prose-headings:mt-3 break-words overflow-wrap-anywhere">{cleanContent}</Markdown>
-                                                        )}
+                                            <div key={group.key} className="space-y-3">
+                                                {/* All file attachments rendered outside message bubble */}
+                                                {renderStandaloneAttachments(attachments as string[], handleOpenFileViewer, sandboxId, project, true)}
 
-                                                        {/* Use the helper function to render user attachments */}
-                                                        {renderAttachments(attachments as string[], handleOpenFileViewer, sandboxId, project)}
+                                                {cleanContent && (<div className="flex justify-end">
+                                                    <div className="flex max-w-[85%] rounded-3xl rounded-br-lg bg-card border px-4 py-3 break-words overflow-hidden">
+                                                        <div className="space-y-3 min-w-0 flex-1">
+                                                            {
+                                                                <ComposioUrlDetector content={cleanContent} className="text-sm prose prose-sm dark:prose-invert chat-markdown max-w-none [&>:first-child]:mt-0 prose-headings:mt-3 break-words overflow-wrap-anywhere" />
+                                                            }
+
+                                                            {/* Use the helper function to render regular (non-spreadsheet) attachments */}
+                                                            {renderAttachments(attachments as string[], handleOpenFileViewer, sandboxId, project)}
+                                                        </div>
                                                     </div>
-                                                </div>
+                                                </div>)}
                                             </div>
                                         );
                                     } else if (group.type === 'assistant_group') {
+                                        // Get agent_id from the first assistant message in this group
+                                        const firstAssistantMsg = group.messages.find(m => m.type === 'assistant');
+                                        const groupAgentId = firstAssistantMsg?.agent_id;
+                                        const groupAgent = groupAgentId ? agentsMap.get(groupAgentId) : undefined;
+
                                         return (
                                             <div key={group.key} ref={groupIndex === groupedMessages.length - 1 ? latestMessageRef : null}>
                                                 <div className="flex flex-col gap-2">
                                                     <div className="flex items-center">
-                                                        <div className="rounded-md flex items-center justify-center">
-                                                            {(() => {
-                                                                const firstAssistantWithAgent = group.messages.find(msg => 
-                                                                    msg.type === 'assistant' && (msg.agents?.avatar || msg.agents?.avatar_color)
-                                                                );
-                                                                if (firstAssistantWithAgent?.agents?.avatar) {
-                                                                    const avatar = firstAssistantWithAgent.agents.avatar;
-                                                                    const color = firstAssistantWithAgent.agents.avatar_color;
-                                                                    return (
-                                                                        <div 
-                                                                            className="h-4 w-5 flex items-center justify-center rounded text-xs"
-                                                                        >
-                                                                            <span className="text-lg">{avatar}</span>
-                                                                        </div>
-                                                                    );
-                                                                }
-                                                                return <KortixLogo size={16} />;
-                                                            })()}
+                                                        <div className="rounded-md flex items-center justify-center relative">
+                                                            {groupAgent || groupAgentId ? (
+                                                                <AgentAvatar agent={groupAgent} agentId={groupAgentId} size={24} className="h-6 w-6" />
+                                                            ) : (
+                                                                getAgentInfo().avatar
+                                                            )}
                                                         </div>
                                                         <p className='ml-2 text-sm text-muted-foreground'>
-                                                            {(() => {
-                                                                const firstAssistantWithAgent = group.messages.find(msg => 
-                                                                    msg.type === 'assistant' && msg.agents?.name
-                                                                );
-                                                                if (firstAssistantWithAgent?.agents?.name) {
-                                                                    return firstAssistantWithAgent.agents.name;
-                                                                }
-                                                                return 'Suna';
-                                                            })()}
+                                                            {groupAgent || groupAgentId ? (
+                                                                <AgentName agent={groupAgent} agentId={groupAgentId} fallback={getAgentInfo().name} />
+                                                            ) : (
+                                                                getAgentInfo().name
+                                                            )}
                                                         </p>
                                                     </div>
-                                                    
+
                                                     {/* Message content - ALL messages in the group */}
-                                                    <div className="flex max-w-[90%] rounded-lg text-sm break-words overflow-hidden">
+                                                    <div className="flex max-w-[90%] text-sm break-words overflow-hidden">
                                                         <div className="space-y-2 min-w-0 flex-1">
                                                             {(() => {
                                                                 // In debug mode, just show raw messages content
@@ -636,7 +890,7 @@ export const ThreadContent: React.FC<ThreadContentProps> = ({
                                                                                     Type: {message.type} | ID: {message.message_id || 'no-id'}
                                                                                 </div>
                                                                                 <pre className="text-xs font-mono whitespace-pre-wrap overflow-x-auto p-2 border border-border rounded-md bg-muted/30">
-                                                                                    {message.content}
+                                                                                    {JSON.stringify(message.content, null, 2)}
                                                                                 </pre>
                                                                                 {message.metadata && message.metadata !== '{}' && (
                                                                                     <div className="mt-2">
@@ -644,7 +898,7 @@ export const ThreadContent: React.FC<ThreadContentProps> = ({
                                                                                             Metadata:
                                                                                         </div>
                                                                                         <pre className="text-xs font-mono whitespace-pre-wrap overflow-x-auto p-2 border border-border rounded-md bg-muted/30">
-                                                                                            {message.metadata}
+                                                                                            {JSON.stringify(message.metadata, null, 2)}
                                                                                         </pre>
                                                                                     </div>
                                                                                 )}
@@ -665,7 +919,6 @@ export const ThreadContent: React.FC<ThreadContentProps> = ({
                                                                     }
                                                                 });
 
-                                                                const renderedToolResultIds = new Set<string>();
                                                                 const elements: React.ReactNode[] = [];
                                                                 let assistantMessageCount = 0; // Move this outside the loop
 
@@ -673,7 +926,8 @@ export const ThreadContent: React.FC<ThreadContentProps> = ({
                                                                     if (message.type === 'assistant') {
                                                                         const parsedContent = safeJsonParse<ParsedContent>(message.content, {});
                                                                         const msgKey = message.message_id || `submsg-assistant-${msgIndex}`;
-                                                                        
+
+
                                                                         if (!parsedContent.content) return;
 
                                                                         const renderedContent = renderMarkdownContent(
@@ -693,7 +947,7 @@ export const ThreadContent: React.FC<ThreadContentProps> = ({
                                                                                 </div>
                                                                             </div>
                                                                         );
-                                                                        
+
                                                                         assistantMessageCount++; // Increment after adding the element
                                                                     }
                                                                 });
@@ -702,7 +956,7 @@ export const ThreadContent: React.FC<ThreadContentProps> = ({
                                                             })()}
 
                                                             {groupIndex === finalGroupedMessages.length - 1 && !readOnly && (streamHookStatus === 'streaming' || streamHookStatus === 'connecting') && (
-                                                                <div className="mt-2">
+                                                                <div className="mt-4">
                                                                     {(() => {
                                                                         // In debug mode, show raw streaming content
                                                                         if (debugMode && streamingTextContent) {
@@ -713,90 +967,73 @@ export const ThreadContent: React.FC<ThreadContentProps> = ({
                                                                             );
                                                                         }
 
+                                                                        // Preprocess content first to remove text-only tool tags
+                                                                        const textToRender = preprocessTextOnlyTools(streamingTextContent || '');
+
                                                                         let detectedTag: string | null = null;
                                                                         let tagStartIndex = -1;
-                                                                        if (streamingTextContent) {
+                                                                        if (textToRender) {
                                                                             // First check for new format
-                                                                            const functionCallsIndex = streamingTextContent.indexOf('<function_calls>');
+                                                                            const functionCallsIndex = textToRender.indexOf('<function_calls>');
                                                                             if (functionCallsIndex !== -1) {
                                                                                 detectedTag = 'function_calls';
                                                                                 tagStartIndex = functionCallsIndex;
                                                                             } else {
-                                                                                // Fall back to old format detection
-                                                                                for (const tag of HIDE_STREAMING_XML_TAGS) {
-                                                                                    const openingTagPattern = `<${tag}`;
-                                                                                    const index = streamingTextContent.indexOf(openingTagPattern);
-                                                                                    if (index !== -1) {
-                                                                                        detectedTag = tag;
-                                                                                        tagStartIndex = index;
-                                                                                        break;
+                                                                                // Check for partial XML tags at the end (e.g., "<function", "<antml", "<", etc.)
+                                                                                // This prevents showing incomplete XML during streaming
+                                                                                const partialXmlMatch = textToRender.match(/<[a-zA-Z_:][a-zA-Z0-9_:]*$|<$/);
+                                                                                if (partialXmlMatch) {
+                                                                                    // Found a partial opening tag at the end
+                                                                                    detectedTag = 'partial';
+                                                                                    tagStartIndex = partialXmlMatch.index!;
+                                                                                } else {
+                                                                                    // Fall back to old format detection
+                                                                                    for (const tag of HIDE_STREAMING_XML_TAGS) {
+                                                                                        const openingTagPattern = `<${tag}`;
+                                                                                        const index = textToRender.indexOf(openingTagPattern);
+                                                                                        if (index !== -1) {
+                                                                                            detectedTag = tag;
+                                                                                            tagStartIndex = index;
+                                                                                            break;
+                                                                                        }
                                                                                     }
                                                                                 }
                                                                             }
                                                                         }
-
-
-                                                                        const textToRender = streamingTextContent || '';
                                                                         const textBeforeTag = detectedTag ? textToRender.substring(0, tagStartIndex) : textToRender;
-                                                                        const showCursor = (streamHookStatus === 'streaming' || streamHookStatus === 'connecting') && !detectedTag;
-                                                                        const IconComponent = detectedTag && detectedTag !== 'function_calls' ? getToolIcon(detectedTag) : null;
+                                                                        const showCursor =
+                                                                            (streamHookStatus ===
+                                                                                'streaming' ||
+                                                                                streamHookStatus ===
+                                                                                'connecting') &&
+                                                                            !detectedTag;
+
+                                                                        // Show minimal processing indicator when agent is active but no streaming text after preprocessing
+                                                                        if (!textToRender && (streamHookStatus === 'streaming' || streamHookStatus === 'connecting')) {
+                                                                            return (
+                                                                                <div className="flex items-center gap-1 py-1 ">
+                                                                                    <div className="h-1 w-1 rounded-full bg-primary/40 animate-pulse duration-1000" />
+                                                                                    <div className="h-1 w-1 rounded-full bg-primary/40 animate-pulse duration-1000 delay-150" />
+                                                                                    <div className="h-1 w-1 rounded-full bg-primary/40 animate-pulse duration-1000 delay-300" />
+                                                                                </div>
+                                                                            );
+                                                                        }
 
                                                                         return (
                                                                             <>
-                                                                                {textBeforeTag && (
-                                                                                    <Markdown className="text-sm prose prose-sm dark:prose-invert chat-markdown max-w-none [&>:first-child]:mt-0 prose-headings:mt-3 break-words overflow-wrap-anywhere">{textBeforeTag}</Markdown>
-                                                                                )}
-                                                                                {showCursor && (
-                                                                                    <span className="inline-block h-4 w-0.5 bg-primary ml-0.5 -mb-1 animate-pulse" />
-                                                                                )}
+                                                                                <StreamingText
+                                                                                    content={textBeforeTag}
+                                                                                    className="text-sm prose prose-sm dark:prose-invert chat-markdown max-w-none [&>:first-child]:mt-0 prose-headings:mt-3 break-words overflow-wrap-anywhere"
+                                                                                />
 
-                                                                                {detectedTag && detectedTag !== 'function_calls' && (
-                                                                                    <div className="mt-2 mb-1">
-                                                                                        <button
-                                                                                            className="animate-shimmer inline-flex items-center gap-1.5 py-1 px-1 text-xs font-medium text-primary bg-muted hover:bg-muted/80 rounded-md transition-colors cursor-pointer border border-primary/20"
-                                                                                        >
-                                                                                            <div className='border-2 bg-gradient-to-br from-neutral-200 to-neutral-300 dark:from-neutral-700 dark:to-neutral-800 flex items-center justify-center p-0.5 rounded-sm border-neutral-400/20 dark:border-neutral-600'>
-                                                                                                <CircleDashed className="h-3.5 w-3.5 text-primary flex-shrink-0 animate-spin animation-duration-2000" />
-                                                                                            </div>
-                                                                                            <span className="font-mono text-xs text-primary">{getUserFriendlyToolName(detectedTag)}</span>
-                                                                                        </button>
-                                                                                    </div>
-                                                                                )}
-
-                                                                                {detectedTag === 'function_calls' && (
-                                                                                    <div className="mt-2 mb-1">
-                                                                                        <button
-                                                                                            className="animate-shimmer inline-flex items-center gap-1.5 py-1 px-1 text-xs font-medium text-primary bg-muted hover:bg-muted/80 rounded-md transition-colors cursor-pointer border border-primary/20"
-                                                                                        >
-                                                                                            <div className='border-2 bg-gradient-to-br from-neutral-200 to-neutral-300 dark:from-neutral-700 dark:to-neutral-800 flex items-center justify-center p-0.5 rounded-sm border-neutral-400/20 dark:border-neutral-600'>
-                                                                                                <CircleDashed className="h-3.5 w-3.5 text-primary flex-shrink-0 animate-spin animation-duration-2000" />
-                                                                                            </div>
-                                                                                            <span className="font-mono text-xs text-primary">
-                                                                                                {extractToolNameFromStream(streamingTextContent) || 'Using Tool...'}
-                                                                                            </span>
-                                                                                        </button>
-                                                                                    </div>
-                                                                                )}
-
-                                                                                {streamingToolCall && !detectedTag && (
-                                                                                    <div className="mt-2 mb-1">
-                                                                                        {(() => {
-                                                                                            const toolName = streamingToolCall.name || streamingToolCall.xml_tag_name || 'Tool';
-                                                                                            const IconComponent = getToolIcon(toolName);
-                                                                                            const paramDisplay = extractPrimaryParam(toolName, streamingToolCall.arguments || '');
-                                                                                            return (
-                                                                                                <button
-                                                                                                    className="animate-shimmer inline-flex items-center gap-1.5 py-1 px-1 text-xs font-medium text-primary bg-muted hover:bg-muted/80 rounded-md transition-colors cursor-pointer border border-primary/20"
-                                                                                                >
-                                                                                                    <div className='border-2 bg-gradient-to-br from-neutral-200 to-neutral-300 dark:from-neutral-700 dark:to-neutral-800 flex items-center justify-center p-0.5 rounded-sm border-neutral-400/20 dark:border-neutral-600'>
-                                                                                                        <CircleDashed className="h-3.5 w-3.5 text-primary flex-shrink-0 animate-spin animation-duration-2000" />
-                                                                                                    </div>
-                                                                                                    <span className="font-mono text-xs text-primary">{toolName}</span>
-                                                                                                    {paramDisplay && <span className="ml-1 text-primary/70 truncate max-w-[200px]" title={paramDisplay}>{paramDisplay}</span>}
-                                                                                                </button>
-                                                                                            );
-                                                                                        })()}
-                                                                                    </div>
+                                                                                {detectedTag && detectedTag !== 'partial' && (
+                                                                                    <ShowToolStream
+                                                                                        content={textToRender.substring(tagStartIndex)}
+                                                                                        messageId={visibleMessages && visibleMessages.length > 0 ? visibleMessages[visibleMessages.length - 1].message_id : "playback-streaming"}
+                                                                                        onToolClick={handleToolClick}
+                                                                                        showExpanded={true}
+                                                                                        startTime={Date.now()}
+                                                                                    />
                                                                                 )}
                                                                             </>
                                                                         );
@@ -806,31 +1043,41 @@ export const ThreadContent: React.FC<ThreadContentProps> = ({
 
                                                             {/* For playback mode, show streaming text and tool calls */}
                                                             {readOnly && groupIndex === finalGroupedMessages.length - 1 && isStreamingText && (
-                                                                <div className="mt-2">
+                                                                <div className="mt-4">
                                                                     {(() => {
+                                                                        // Preprocess content first to remove text-only tool tags
+                                                                        const textToRender = preprocessTextOnlyTools(streamingText || '');
+
                                                                         let detectedTag: string | null = null;
                                                                         let tagStartIndex = -1;
-                                                                        if (streamingText) {
+                                                                        if (textToRender) {
                                                                             // First check for new format
-                                                                            const functionCallsIndex = streamingText.indexOf('<function_calls>');
+                                                                            const functionCallsIndex = textToRender.indexOf('<function_calls>');
                                                                             if (functionCallsIndex !== -1) {
                                                                                 detectedTag = 'function_calls';
                                                                                 tagStartIndex = functionCallsIndex;
                                                                             } else {
-                                                                                // Fall back to old format detection
-                                                                                for (const tag of HIDE_STREAMING_XML_TAGS) {
-                                                                                    const openingTagPattern = `<${tag}`;
-                                                                                    const index = streamingText.indexOf(openingTagPattern);
-                                                                                    if (index !== -1) {
-                                                                                        detectedTag = tag;
-                                                                                        tagStartIndex = index;
-                                                                                        break;
+                                                                                // Check for partial XML tags at the end (e.g., "<function", "<antml", "<", etc.)
+                                                                                // This prevents showing incomplete XML during streaming
+                                                                                const partialXmlMatch = textToRender.match(/<[a-zA-Z_:][a-zA-Z0-9_:]*$|<$/);
+                                                                                if (partialXmlMatch) {
+                                                                                    // Found a partial opening tag at the end
+                                                                                    detectedTag = 'partial';
+                                                                                    tagStartIndex = partialXmlMatch.index!;
+                                                                                } else {
+                                                                                    // Fall back to old format detection
+                                                                                    for (const tag of HIDE_STREAMING_XML_TAGS) {
+                                                                                        const openingTagPattern = `<${tag}`;
+                                                                                        const index = textToRender.indexOf(openingTagPattern);
+                                                                                        if (index !== -1) {
+                                                                                            detectedTag = tag;
+                                                                                            tagStartIndex = index;
+                                                                                            break;
+                                                                                        }
                                                                                     }
                                                                                 }
                                                                             }
                                                                         }
-
-                                                                        const textToRender = streamingText || '';
                                                                         const textBeforeTag = detectedTag ? textToRender.substring(0, tagStartIndex) : textToRender;
                                                                         const showCursor = isStreamingText && !detectedTag;
 
@@ -840,27 +1087,25 @@ export const ThreadContent: React.FC<ThreadContentProps> = ({
                                                                                 {debugMode && streamingText ? (
                                                                                     <pre className="text-xs font-mono whitespace-pre-wrap overflow-x-auto p-2 border border-border rounded-md bg-muted/30">
                                                                                         {streamingText}
+                                                                                        {showCursor && (
+                                                                                            <span className="inline-block h-4 w-0.5 bg-primary ml-0.5 -mb-1 animate-pulse duration-1000" />
+                                                                                        )}
                                                                                     </pre>
                                                                                 ) : (
                                                                                     <>
-                                                                                        {textBeforeTag && (
-                                                                                            <Markdown className="text-sm prose prose-sm dark:prose-invert chat-markdown max-w-none [&>:first-child]:mt-0 prose-headings:mt-3 break-words overflow-wrap-anywhere">{textBeforeTag}</Markdown>
-                                                                                        )}
-                                                                                        {showCursor && (
-                                                                                            <span className="inline-block h-4 w-0.5 bg-primary ml-0.5 -mb-1 animate-pulse" />
-                                                                                        )}
+                                                                                        <StreamingText
+                                                                                            content={textBeforeTag}
+                                                                                            className="text-sm prose prose-sm dark:prose-invert chat-markdown max-w-none [&>:first-child]:mt-0 prose-headings:mt-3 break-words overflow-wrap-anywhere"
+                                                                                        />
 
-                                                                                        {detectedTag && (
-                                                                                            <div className="mt-2 mb-1">
-                                                                                                <button
-                                                                                                    className="animate-shimmer inline-flex items-center gap-1.5 py-1 px-2.5 text-xs font-medium text-primary bg-primary/10 hover:bg-primary/20 rounded-md transition-colors cursor-pointer border border-primary/20"
-                                                                                                >
-                                                                                                    <CircleDashed className="h-3.5 w-3.5 text-primary flex-shrink-0 animate-spin animation-duration-2000" />
-                                                                                                    <span className="font-mono text-xs text-primary">
-                                                                                                        {detectedTag === 'function_calls' ? (extractToolNameFromStream(streamingText) || 'Using Tool...') : detectedTag}
-                                                                                                    </span>
-                                                                                                </button>
-                                                                                            </div>
+                                                                                        {detectedTag && detectedTag !== 'partial' && (
+                                                                                            <ShowToolStream
+                                                                                                content={textToRender.substring(tagStartIndex)}
+                                                                                                messageId="streamingTextContent"
+                                                                                                onToolClick={handleToolClick}
+                                                                                                showExpanded={true}
+                                                                                                startTime={Date.now()} // Tool just started now
+                                                                                            />
                                                                                         )}
                                                                                     </>
                                                                                 )}
@@ -886,11 +1131,13 @@ export const ThreadContent: React.FC<ThreadContentProps> = ({
                                             {/* Logo positioned above the loader */}
                                             <div className="flex items-center">
                                                 <div className="rounded-md flex items-center justify-center">
-                                                    {agentAvatar}
+                                                    {getAgentInfo().avatar}
                                                 </div>
-                                                <p className='ml-2 text-sm text-muted-foreground'>{agentName || 'Suna'}</p>
+                                                <p className='ml-2 text-sm text-muted-foreground'>
+                                                    {getAgentInfo().name}
+                                                </p>
                                             </div>
-                                            
+
                                             {/* Loader content */}
                                             <div className="space-y-2 w-full h-12">
                                                 <AgentLoader />
@@ -898,19 +1145,19 @@ export const ThreadContent: React.FC<ThreadContentProps> = ({
                                         </div>
                                     </div>
                                 )}
-
-                            {/* For playback mode - Show tool call animation if active */}
                             {readOnly && currentToolCall && (
                                 <div ref={latestMessageRef}>
                                     <div className="flex flex-col gap-2">
                                         {/* Logo positioned above the tool call */}
                                         <div className="flex justify-start">
                                             <div className="rounded-md flex items-center justify-center">
-                                                {agentAvatar}
+                                                {getAgentInfo().avatar}
                                             </div>
-                                            <p className='ml-2 text-sm text-muted-foreground'>{agentName || 'Suna'}</p>
+                                            <p className='ml-2 text-sm text-muted-foreground'>
+                                                {getAgentInfo().name}
+                                            </p>
                                         </div>
-                                        
+
                                         {/* Tool call content */}
                                         <div className="space-y-2">
                                             <div className="animate-shimmer inline-flex items-center gap-1.5 py-1.5 px-3 text-xs font-medium text-primary bg-primary/10 rounded-md border border-primary/20">
@@ -931,39 +1178,31 @@ export const ThreadContent: React.FC<ThreadContentProps> = ({
                                         {/* Logo positioned above the streaming indicator */}
                                         <div className="flex justify-start">
                                             <div className="rounded-md flex items-center justify-center">
-                                                {agentAvatar}
+                                                {getAgentInfo().avatar}
                                             </div>
-                                            <p className='ml-2 text-sm text-muted-foreground'>{agentName || 'Suna'}</p>
+                                            <p className='ml-2 text-sm text-muted-foreground'>
+                                                {getAgentInfo().name}
+                                            </p>
                                         </div>
-                                        
+
                                         {/* Streaming indicator content */}
                                         <div className="max-w-[90%] px-4 py-3 text-sm">
                                             <div className="flex items-center gap-1.5 py-1">
-                                                <div className="h-1.5 w-1.5 rounded-full bg-primary/50 animate-pulse" />
-                                                <div className="h-1.5 w-1.5 rounded-full bg-primary/50 animate-pulse delay-150" />
-                                                <div className="h-1.5 w-1.5 rounded-full bg-primary/50 animate-pulse delay-300" />
+                                                <div className="h-1.5 w-1.5 rounded-full bg-primary/50 animate-pulse duration-1000" />
+                                                <div className="h-1.5 w-1.5 rounded-full bg-primary/50 animate-pulse duration-1000 delay-150" />
+                                                <div className="h-1.5 w-1.5 rounded-full bg-primary/50 animate-pulse duration-1000 delay-300" />
                                             </div>
                                         </div>
                                     </div>
                                 </div>
                             )}
+                            <div className="!h-48" />
                         </div>
                     </div>
-                    <div ref={messagesEndRef} className="h-1" />
                 </div>
             )}
 
-            {/* Scroll to bottom button */}
-            {showScrollButton && (
-                <Button
-                    variant="outline"
-                    size="icon"
-                    className="fixed bottom-20 right-6 z-10 h-8 w-8 rounded-full shadow-md"
-                    onClick={() => scrollToBottom('smooth')}
-                >
-                    <ArrowDown className="h-4 w-4" />
-                </Button>
-            )}
+            {/* No scroll button needed with flex-column-reverse */}
         </>
     );
 };
